@@ -4,7 +4,7 @@ from typing import Optional, Tuple, Dict, Any, List
 from sqlalchemy.orm import Session
 from app.taxonomy.models import DimProduct, DimVariant
 from app.normalization.models import DimProductAlias
-from app.normalization.rules.classification_rules import classify_listing_intent
+from app.normalization.rules.classification_rules import classify_listing_intent, is_junk_listing
 
 # Static maintainable alias seed dictionary for bootstrap / offline speed
 STATIC_ALIASES: Dict[str, str] = {
@@ -192,9 +192,10 @@ def match_product_and_variant(
 
     # 0. CHẶN PHỤ KIỆN VÀ LINH KIỆN HỎNG / DỊCH VỤ NGAY TỪ ĐẦU
     intent, intent_conf = classify_listing_intent(title, description)
-    if intent in ("ACCESSORY", "PARTS", "SERVICE", "SPAM", "BUY"):
+    if intent in ("ACCESSORY", "PARTS", "SERVICE", "SPAM", "BUY") or is_junk_listing(title):
         # Không được match một chiếc ốp lưng hay xác máy thành sản phẩm điện thoại/PC hoàn chỉnh
-        return None, None, 0.0, f"EXCLUDED_{intent}", attrs
+        ex_label = intent if intent != "SELL" else "ACCESSORY"
+        return None, None, 0.0, f"EXCLUDED_{ex_label}", attrs
 
     # 1. Check Static Aliases (sorted by longest alias first)
     sorted_aliases = sorted(STATIC_ALIASES.items(), key=lambda x: len(x[0]), reverse=True)

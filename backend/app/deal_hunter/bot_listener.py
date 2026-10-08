@@ -140,8 +140,10 @@ class TelegramBotListener:
         try:
             from app.collectors.service import run_collector_job
             from app.normalization.service import process_batch_listings
+            from app.normalization.rules.classification_rules import is_relevant_to_keyword
             from database import SessionLocal
             from app.collectors.models import FactRawListing
+            from app.normalization.models import FactNormalizedListing
             from sqlalchemy import desc
 
             # 2. Cào dữ liệu từ cả 3 nguồn
@@ -155,43 +157,103 @@ class TelegramBotListener:
             try:
                 process_batch_listings(db, limit=40)
 
-                # 4. Tìm các tin liên quan vừa cào
-                kw_parts = [p.strip().lower() for p in keyword.split() if p.strip()]
-                all_recent = (
-                    db.query(FactRawListing)
-                    .order_by(desc(FactRawListing.first_seen_at))
-                    .limit(60)
+                # 4. Ưu tiên lấy từ FactNormalizedListing (đã qua pipeline classification)
+                # Chỉ lấy tin SELL + có product_id + giá hợp lệ
+                normalized_recent = (
+                    db.query(FactNormalizedListing)
+                    .filter(
+                        FactNormalizedListing.classification == "SELL",
+                        FactNormalizedListing.price_valid == True,
+                        FactNormalizedListing.normalized_price > 0
+                    )
+                    .order_by(desc(FactNormalizedListing.normalized_at))
+                    .limit(80)
                     .all()
                 )
 
                 matched_items = []
-                for item in all_recent:
-                    title_lower = (item.raw_title or "").lower()
-                    if all(part in title_lower for part in kw_parts) or any(part in title_lower for part in kw_parts if len(part) >= 4):
-                        # Lọc giá hợp lý
+                seen_urls = set()
+
+                for norm in normalized_recent:
+                    raw = norm.raw_listing
+                    if not raw:
+                        continue
+
+                    title = raw.raw_title or ""
+
+                    # FILTER CHÍNH XÁC: Dùng is_relevant_to_keyword thay vì matching lỏng lẻo
+                    if not is_relevant_to_keyword(title, keyword):
+                        continue
+
+                    # Chống trùng URL
+                    if raw.url in seen_urls:
+                        continue
+                    seen_urls.add(raw.url)
+
+                    price_num = float(norm.normalized_price or 0)
+                    if price_num < 100_000:
+                        continue
+
+                    grp_name = ""
+                    if raw.raw_metadata and isinstance(raw.raw_metadata, dict):
+                        grp_name = raw.raw_metadata.get("group_name", "")
+
+                    source_str = raw.source.name if raw.source else "Marketplace"
+                    if grp_name:
+                        source_str = f"Hội nhóm: {grp_name[:35]}"
+
+                    cmt_count = len(raw.comments) if raw.comments else 0
+                    matched_items.append({
+                        "title": title,
+                        "price": price_num,
+                        "price_text": raw.raw_price_text,
+                        "url": raw.url,
+                        "source": source_str,
+                        "comment_count": cmt_count
+                    })
+
+                # 4b. Fallback: Nếu chưa có kết quả từ normalized, thử raw (nhưng vẫn dùng filter)
+                if not matched_items:
+                    all_recent = (
+                        db.query(FactRawListing)
+                        .order_by(desc(FactRawListing.first_seen_at))
+                        .limit(60)
+                        .all()
+                    )
+                    for item in all_recent:
+                        title = item.raw_title or ""
+                        if not is_relevant_to_keyword(title, keyword):
+                            continue
+
+                        if item.url in seen_urls:
+                            continue
+                        seen_urls.add(item.url)
+
                         price_num = 0.0
                         if item.raw_price_text:
                             from app.deal_hunter.comment_appraiser import parse_vietnamese_price
                             price_num = parse_vietnamese_price(item.raw_price_text) or 0.0
-                        
-                        if price_num >= 100_000:  # Cho phép cả RAM, linh kiện và phụ kiện chính hãng
-                            grp_name = ""
-                            if item.raw_metadata and isinstance(item.raw_metadata, dict):
-                                grp_name = item.raw_metadata.get("group_name", "")
 
-                            source_str = item.source.name if item.source else "Marketplace"
-                            if grp_name:
-                                source_str = f"Hội nhóm: {grp_name[:35]}"
+                        if price_num < 100_000:
+                            continue
 
-                            cmt_count = len(item.comments) if item.comments else 0
-                            matched_items.append({
-                                "title": item.raw_title,
-                                "price": price_num,
-                                "price_text": item.raw_price_text,
-                                "url": item.url,
-                                "source": source_str,
-                                "comment_count": cmt_count
-                            })
+                        grp_name = ""
+                        if item.raw_metadata and isinstance(item.raw_metadata, dict):
+                            grp_name = item.raw_metadata.get("group_name", "")
+
+                        source_str = item.source.name if item.source else "Marketplace"
+                        if grp_name:
+                            source_str = f"Hội nhóm: {grp_name[:35]}"
+
+                        cmt_count = len(item.comments) if item.comments else 0
+                        matched_items.append({
+                            "title": title,
+                            "price": price_num,
+                            "price_text": item.raw_price_text,
+                            "url": item.url,
+                            "source": source_str,
+                            "comment_count": cmt_count
+                        })
 
                 if not matched_items:
                     self._send_message(
@@ -212,10 +274,10 @@ class TelegramBotListener:
 
                 # 5. Soạn tin nhắn báo cáo
                 top_items_text = ""
-                for idx, it in enumerate(matched_items[:3], 1):
+                for idx, it in enumerate(matched_items[:5], 1):
                     cmt_badge = f" | 💬 {it['comment_count']} bình luận" if it['comment_count'] > 0 else ""
                     top_items_text += (
-                        f"<b>{idx}. {it['title'][:48]}...</b>\n"
+                        f"<b>{idx}. {it['title'][:55]}</b>\n"
                         f"   🏷️ Giá: <code>{it['price']:,.0f} đ</code> | 📍 {it['source']}{cmt_badge}\n"
                         f"   🔗 <a href=\"{it['url']}\">Bấm vào đây để mở bài đăng gốc</a>\n\n"
                     )
@@ -249,3 +311,4 @@ class TelegramBotListener:
             self._send_message(chat_id, f"❌ Có lỗi xảy ra trong quá trình quét dữ liệu: {e}")
 
 bot_listener = TelegramBotListener()
+

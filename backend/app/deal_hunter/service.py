@@ -51,14 +51,30 @@ class DealHunterService:
         if not raw:
             raw = db.query(FactRawListing).filter(FactRawListing.id == norm.raw_listing_id).first()
 
+        # BẮT BUỘC: Kiểm tra tin rác / phụ kiện / linh kiện lỗi
+        from app.normalization.rules.classification_rules import is_junk_listing, is_relevant_to_keyword
+        raw_title = raw.raw_title if raw else ""
+        if is_junk_listing(raw_title):
+            logger.info(f"Listing {normalized_listing_id} bị bỏ qua do là tin rác/phụ kiện: '{raw_title}'")
+            return None
+
         # 1. Thu thập thông tin sản phẩm và phân loại
         product = db.query(DimProduct).filter(DimProduct.id == norm.product_id).first() if norm.product_id else None
+        if not product:
+            logger.info(f"Listing {normalized_listing_id} bị bỏ qua do không tìm thấy DimProduct tương ứng.")
+            return None
+
+        # BẮT BUỘC: Tiêu đề phải thực sự khớp chính xác với sản phẩm định giá (không nhầm ốp, bản base vs pro max, thế hệ ram)
+        if not is_relevant_to_keyword(raw_title, product.name):
+            logger.info(f"Listing {normalized_listing_id} ('{raw_title}') không khớp với sản phẩm '{product.name}'. Bỏ qua thẩm định.")
+            return None
+
         variant = db.query(DimVariant).filter(DimVariant.id == norm.variant_id).first() if norm.variant_id else None
         condition = db.query(DimCondition).filter(DimCondition.id == norm.condition_id).first() if norm.condition_id else None
         source = db.query(DimSource).filter(DimSource.id == raw.source_id).first() if (raw and raw.source_id) else None
 
         category_code = "DEFAULT"
-        if product and product.category:
+        if product.category:
             category_code = product.category.code if hasattr(product.category, 'code') and product.category.code else product.category.name
 
         # 2. Truy vấn Market Analytics

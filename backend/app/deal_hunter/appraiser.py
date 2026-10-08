@@ -49,8 +49,12 @@ class DealAppraiser:
 
         # 4. ANOMALY & RISK PRE-CHECKS (Giá ảo, trả góp, phụ kiện)
         import re
+        from app.normalization.rules.classification_rules import is_junk_listing
         is_installment = bool(re.search(r"\b(trả góp|trả trước|đưa trước|chỉ từ|góp từ|góp 0%|góp qua cccd|hồ sơ duyệt|nợ xấu|góp chỉ)\b", desc_lower))
-        is_accessory_or_parts = bool(re.search(r"\b(ốp lưng|ốp|cường lực|bao da|xác máy|dính icloud|rã xác|hỏng màn|chết main|màn sọc|sọc màn)\b", desc_lower))
+        is_accessory_or_parts = (
+            is_junk_listing(title)
+            or bool(re.search(r"\b(ốp lưng|ốp|case|cường lực|bao da|xác máy|rã xác|hộp rỗng|box rỗng)\b", desc_lower))
+        )
         
         # Deep discount anomaly: Rẻ hơn 55% so với median hoặc rẻ hơn 50% so với Quick Sell là bất thường
         is_deep_discount_anomaly = False
