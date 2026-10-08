@@ -275,8 +275,8 @@ class FacebookGroupCollector(BaseCollector):
                             author_el = post.query_selector("h2, h3, strong, a[role='link']")
                             author = author_el.inner_text().strip() if author_el else lines[0]
 
-                            # Bóc tách giá từ bài đăng
-                            price_match = re.search(r"(\d+[\d.,]*\s*(?:tr|triệu|m|k|củ|đ|vnd|vnđ))", text_content, re.IGNORECASE)
+                            # Bóc tách giá từ bài đăng (tránh nhầm MHz thành m)
+                            price_match = re.search(r"(\d+[\d.,]*\s*(?:triệu|tr\b|củ\b|k\b|đ\b|vnd|vnđ|m(?![a-z])))", text_content, re.IGNORECASE)
                             price_str = price_match.group(1) if price_match else "Thương lượng"
 
                             # Bóc tách ảnh sản phẩm
@@ -375,12 +375,18 @@ class FacebookGroupCollector(BaseCollector):
                     and not re.match(r"^\d+\s*(?:giờ|phút|ngày|tháng|tuần)\b", l.strip().lower())
                 ]
                 
-                # Tìm dòng tiêu đề có nghĩa đầu tiên
+                # Tìm dòng tiêu đề có nghĩa (ưu tiên dòng chứa thông số hoặc tên sản phẩm)
                 title = ""
                 for l in clean_lines:
-                    if len(l) >= 10 and not l.isdigit():
-                        title = l[:150]
-                        break
+                    if len(l) >= 8 and not l.isdigit():
+                        if re.search(r"\b(ram|ddr|gb|pc|laptop|ssd|hdd|vga|rtx|gtx|bán|pass|thanh lý)\b", l.lower()):
+                            title = l[:150]
+                            break
+                if not title:
+                    for l in clean_lines:
+                        if len(l) >= 10 and not l.isdigit():
+                            title = l[:150]
+                            break
                 if not title:
                     title = clean_lines[0][:150] if clean_lines else f"{post.get('author', 'Bài đăng')} - {post.get('price', 'Thương lượng')}"
 

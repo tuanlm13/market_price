@@ -23,27 +23,36 @@ def parse_vietnamese_price(text: str) -> Optional[float]:
         return None
     
     clean_text = text.lower()
+    # Loại bỏ các thông số tần số bus không phải giá tiền
+    clean_text = re.sub(r'\b\d+\s*mhz\b', '', clean_text)
 
     # 1. Dạng hỗn hợp: 12tr2, 11m8, 12củ5
-    pattern_mixed = re.search(r'(\d+)\s*(?:tr|m|củ)\s*(\d+)', clean_text)
+    pattern_mixed = re.search(r'(\d+)\s*(?:tr|m(?!hz)|củ)\s*(\d+)', clean_text)
     if pattern_mixed:
         major = int(pattern_mixed.group(1))
-        minor_str = pattern_mixed.group(2)
-        # Nếu minor là 1 chữ số (vd: 2 -> 200,000; 5 -> 500,000)
-        if len(minor_str) == 1:
-            minor = int(minor_str) * 100_000
-        elif len(minor_str) == 2:
-            minor = int(minor_str) * 10_000
-        else:
-            minor = int(minor_str)
-        return float(major * 1_000_000 + minor)
+        if major < 500:
+            minor_str = pattern_mixed.group(2)
+            # Nếu minor là 1 chữ số (vd: 2 -> 200,000; 5 -> 500,000)
+            if len(minor_str) == 1:
+                minor = int(minor_str) * 100_000
+            elif len(minor_str) == 2:
+                minor = int(minor_str) * 10_000
+            else:
+                minor = int(minor_str)
+            return float(major * 1_000_000 + minor)
 
     # 2. Dạng thập phân triệu: 12.2tr, 12,5 triệu, 11.8m, 10 củ
-    pattern_m = re.search(r'(\d+(?:[.,]\d+)?)\s*(?:tr|triệu|m|củ)', clean_text)
+    pattern_m = re.search(r'(\d+(?:[.,]\d+)?)\s*(?:tr\b|triệu\b|m(?![a-z])|củ\b)', clean_text)
     if pattern_m:
         val_str = pattern_m.group(1).replace(',', '.')
         try:
-            return float(val_str) * 1_000_000
+            val = float(val_str)
+            # Nếu dùng 'm' mà >= 500 thì thường là MHz hoặc bus, không phải tiền triệu
+            unit_match = pattern_m.group(0).lower()
+            if "m" in unit_match and "triệu" not in unit_match and val >= 500:
+                pass
+            else:
+                return val * 1_000_000
         except ValueError:
             pass
 

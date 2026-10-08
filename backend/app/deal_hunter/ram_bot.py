@@ -6,7 +6,8 @@ import logging
 import threading
 import urllib.request
 import urllib.parse
-from typing import Dict, Any, Optional, Tuple, Set
+from typing import Dict, Any, Optional, Tuple, Set, List
+from datetime import datetime
 
 from app.normalization.rules.classification_rules import classify_listing_intent, is_junk_listing
 
@@ -86,21 +87,33 @@ def is_ram_post(title: str, description: str = "") -> Tuple[bool, str]:
     if not has_ram_kw:
         return False, "NO_RAM_KEYWORD"
 
-    # 4. Loại trừ trường hợp bán nguyên chiếc laptop / thùng PC
-    if re.search(r"\b(laptop|macbook|thinkpad|máy bàn|thùng máy|dàn máy|case máy)\b", title_lower):
-        if not re.search(r"\b(ram|thanh ram|kit ram|bán ram|xả ram|pass ram)\b", title_lower[:25]):
-            if re.search(r"\b(i3|i5|i7|i9|ryzen|r5|r7|gtx|rtx|fhd|oled|ips|inch)\b", title_lower):
+    # 4. Loại trừ trường hợp bán nguyên chiếc laptop / thùng PC / máy đồng bộ
+    pc_indicators = r"\b(laptop|macbook|thinkpad|máy bàn|thùng máy|dàn máy|case máy|case pc|cây pc|cây máy|đồng bộ|mini pc|all in one|aio)\b"
+    has_cpu_or_gpu = bool(re.search(r"\b(i3|i5|i7|i9|ryzen\s*\d|r[3579]\b|core\s*ultra|gtx\b|rtx\b)\b", title_lower))
+
+    if re.search(pc_indicators, title_lower) or (has_cpu_or_gpu and not title_lower.startswith(("ram", "thanh ram", "kit ram", "bán ram"))):
+        if not re.search(r"\b(?:thanh|kit|cây)\s+ram\b", title_lower):
+            if has_cpu_or_gpu or re.search(r"\b(main|vga|nguồn|ssd\s*\d|màn\s*hình|hdd\s*\d)\b", title_lower):
                 return False, "WHOLE_LAPTOP_OR_PC"
 
     # 5. Tiêu đề hoặc mở đầu mô tả phải tập trung vào RAM
     is_ram_focused_title = bool(
         re.search(r"\b(ram|ddr3|ddr4|ddr5|pc3|pc4|pc5|sodimm)\b", title_lower)
-        or re.search(r"\b\d+gb\s+(ddr\d|bus\b)", title_lower)
-        or re.search(r"\b(kit|thanh)\s+ram\b", title_lower)
+        or re.search(r"\b\d+gb\s+(?:ddr\d|bus\b)", title_lower)
+        or re.search(r"\b(?:kit|thanh)\s+ram\b", title_lower)
     )
 
     if not is_ram_focused_title:
-        if not re.search(r"\b(bán|pass|thanh lý|xả)\s+(?:thanh\s+)?ram\b", desc_lower[:80]):
+        # Nếu tiêu đề chưa rõ RAM (ví dụ: tên shop/tên người), kiểm tra 300 ký tự đầu mô tả
+        desc_head = desc_lower[:300]
+        is_ram_in_desc = bool(
+            re.search(r"\b(ram|ddr3|ddr4|ddr5|pc3|pc4|pc5|sodimm)\b", desc_head)
+            and (
+                re.search(r"\b(bán|pass|thanh lý|xả|giá|kit|thanh|samsung|kingston|corsair|crucial|adata|lexar|gskill|teamgroup)\b", desc_head)
+                or re.search(r"\b\d+gb\b", desc_head)
+            )
+        )
+        if not is_ram_in_desc:
             return False, "NOT_RAM_FOCUSED"
 
     return True, "VALID_RAM_SELL"
@@ -395,10 +408,10 @@ class RamTelegramBotListener:
 
         try:
             from app.collectors.service import run_collector_job
-            from app.normalization.service import process_batch_listings
             from database import SessionLocal
             from app.collectors.models import FactRawListing
-            from app.normalization.models import FactNormalizedListing
+            import app.taxonomy.models  # ensure ORM mappers registered
+            from app.deal_hunter.comment_appraiser import parse_vietnamese_price
             from sqlalchemy import desc
 
             # Cào dữ liệu theo ngữ cảnh RAM
@@ -408,61 +421,142 @@ class RamTelegramBotListener:
 
             db = SessionLocal()
             try:
-                process_batch_listings(db, limit=40)
-
-                # Tìm các tin thoả mãn is_ram_post
+                # Quét các bài đăng gần đây
                 all_recent = (
                     db.query(FactRawListing)
                     .order_by(desc(FactRawListing.first_seen_at))
-                    .limit(100)
+                    .limit(150)
                     .all()
                 )
 
-                matched_items = []
                 seen_urls = set()
-                kw_parts = [p.strip().lower() for p in keyword.lower().split() if p.strip()]
+                q_tokens = [p.strip().lower() for p in keyword.lower().split() if p.strip()]
+                # Các token kỹ thuật quan trọng như ddr3, ddr4, ddr5, 16gb, 8gb, 32gb...
+                tech_tokens = [
+                    t for t in q_tokens 
+                    if re.match(r"^(ddr\d|pc\d|\d+gb|\d+g)$", t)
+                ]
+
+                # Phân nhóm theo 3 nguồn chính
+                grouped_results: Dict[str, List[Dict[str, Any]]] = {
+                    "FACEBOOK_GROUPS": [],
+                    "FACEBOOK_MARKETPLACE": [],
+                    "CHOTOT": []
+                }
 
                 for raw in all_recent:
                     title = raw.raw_title or ""
                     desc_text = raw.raw_description or ""
+                    url = raw.url or ""
 
-                    # BẮT BUỘC: Phải là bài đăng BÁN RAM
+                    if not url or url in seen_urls:
+                        continue
+
+                    # BẮT BUỘC: Phải là bài đăng BÁN RAM hợp lệ
                     ok, _ = is_ram_post(title, desc_text)
                     if not ok:
                         continue
 
-                    # Khớp từ khóa tìm kiếm
+                    full_search_text = f"{title} {desc_text}".lower()
+
+                    # Nếu người dùng tìm phiên bản cụ thể (ví dụ ddr5 hoặc 16gb), bài đăng phải chứa token đó
+                    if tech_tokens:
+                        has_all_tech = True
+                        for tt in tech_tokens:
+                            # ddr5 khớp ddr5 hoặc pc5, 16gb khớp 16gb hoặc 16g
+                            if tt == "ddr5" and ("ddr5" in full_search_text or "pc5" in full_search_text):
+                                continue
+                            if tt == "ddr4" and ("ddr4" in full_search_text or "pc4" in full_search_text):
+                                continue
+                            if tt == "ddr3" and ("ddr3" in full_search_text or "pc3" in full_search_text):
+                                continue
+                            if tt.endswith("gb") and (tt in full_search_text or tt[:-1] in full_search_text):
+                                continue
+                            if tt not in full_search_text:
+                                has_all_tech = False
+                                break
+                        if not has_all_tech:
+                            continue
+
+                    # Tính điểm khớp từ khóa
+                    match_score = 0
                     title_lower = title.lower()
-                    if not any(part in title_lower for part in kw_parts if len(part) >= 3):
-                        continue
+                    for tok in q_tokens:
+                        if tok in title_lower:
+                            match_score += 4
+                        elif tok in full_search_text:
+                            match_score += 1
+                    for tt in tech_tokens:
+                        if tt in title_lower:
+                            match_score += 6
+                        elif tt in full_search_text:
+                            match_score += 3
 
-                    if raw.url in seen_urls:
-                        continue
-                    seen_urls.add(raw.url)
+                    # Xác định nguồn
+                    src_code = ""
+                    if raw.source and hasattr(raw.source, "code"):
+                        src_code = raw.source.code
+                    if not src_code:
+                        if "facebook.com/groups" in url:
+                            src_code = "FACEBOOK_GROUPS"
+                        elif "facebook.com/marketplace" in url:
+                            src_code = "FACEBOOK_MARKETPLACE"
+                        elif "chotot.com" in url:
+                            src_code = "CHOTOT"
+                        else:
+                            src_code = "CHOTOT"
 
-                    # Phân tích giá
-                    from app.deal_hunter.comment_appraiser import parse_vietnamese_price
+                    if src_code not in grouped_results:
+                        grouped_results[src_code] = []
+
+                    seen_urls.add(url)
                     price_num = parse_vietnamese_price(raw.raw_price_text or "") or 0.0
 
                     grp_name = ""
                     if raw.raw_metadata and isinstance(raw.raw_metadata, dict):
                         grp_name = raw.raw_metadata.get("group_name", "")
 
-                    source_str = raw.source.name if raw.source else "Marketplace"
-                    if grp_name:
-                        source_str = f"Hội nhóm: {grp_name[:35]}"
+                    source_str = "Chợ Tốt"
+                    if src_code == "FACEBOOK_GROUPS":
+                        source_str = f"Hội nhóm: {grp_name[:30]}" if grp_name else "Hội nhóm Facebook"
+                    elif src_code == "FACEBOOK_MARKETPLACE":
+                        source_str = "Facebook Marketplace"
+
+                    # Nếu title là tên shop/tên người ngắn mà desc có dòng sản phẩm RAM chi tiết -> tạo display_title đẹp
+                    display_title = title
+                    if len(title.split()) <= 3 and not re.search(r"\b(ddr|gb|bus)\b", title_lower):
+                        for dl in desc_text.split("\n"):
+                            dl_clean = dl.strip()
+                            if len(dl_clean) >= 10 and re.search(r"\b(ram|ddr\d|kit|\d+gb)\b", dl_clean.lower()):
+                                display_title = f"{dl_clean[:55]} ({title})"
+                                break
 
                     cmt_count = len(raw.comments) if raw.comments else 0
-                    matched_items.append({
-                        "title": title,
+                    grouped_results[src_code].append({
+                        "title": display_title,
                         "price": price_num,
                         "price_text": raw.raw_price_text,
-                        "url": raw.url,
+                        "url": url,
                         "source": source_str,
-                        "comment_count": cmt_count
+                        "comment_count": cmt_count,
+                        "match_score": match_score,
+                        "first_seen_at": raw.first_seen_at
                     })
 
-                if not matched_items:
+                # Sắp xếp từng nguồn theo điểm khớp và độ mới
+                for sc in grouped_results:
+                    grouped_results[sc].sort(
+                        key=lambda x: (x["match_score"], x["first_seen_at"] or datetime.min),
+                        reverse=True
+                    )
+
+                # Chọn kết quả đại diện từ mỗi nguồn (tối đa 2-3 tin/nguồn)
+                fb_group_top = grouped_results["FACEBOOK_GROUPS"][:2]
+                fb_mp_top = grouped_results["FACEBOOK_MARKETPLACE"][:2]
+                chotot_top = grouped_results["CHOTOT"][:2]
+
+                total_matched = len(fb_group_top) + len(fb_mp_top) + len(chotot_top)
+                if total_matched == 0:
                     self._send_message(
                         chat_id,
                         f"⚠️ Hiện tại chưa tìm thấy tin <b>BÁN RAM</b> nào mới khớp với <code>{keyword}</code> trên các nhóm và sàn.\n"
@@ -470,21 +564,40 @@ class RamTelegramBotListener:
                     )
                     return
 
-                # Soạn tin nhắn báo cáo danh sách
-                top_items_text = ""
-                for idx, it in enumerate(matched_items[:5], 1):
-                    cmt_badge = f" | 💬 {it['comment_count']} cmt" if it['comment_count'] > 0 else ""
-                    price_disp = f"{it['price']:,.0f} đ" if it['price'] > 0 else (it['price_text'] or "Thương lượng")
-                    top_items_text += (
-                        f"<b>{idx}. {it['title'][:55]}</b>\n"
-                        f"   🏷️ Giá: <code>{price_disp}</code> | 📍 {it['source']}{cmt_badge}\n"
-                        f"   🔗 <a href=\"{it['url']}\">Bấm vào đây để mở bài đăng gốc</a>\n\n"
-                    )
+                # Soạn tin nhắn kết quả phân theo nhóm nguồn
+                sections = []
+                item_idx = 1
 
+                def render_section(header: str, items_list: List[Dict[str, Any]]) -> str:
+                    nonlocal item_idx
+                    if not items_list:
+                        return ""
+                    text_sec = f"{header}\n"
+                    for it in items_list:
+                        cmt_badge = f" | 💬 {it['comment_count']} cmt" if it['comment_count'] > 0 else ""
+                        price_disp = f"{it['price']:,.0f} đ" if it['price'] > 0 else (it['price_text'] or "Thương lượng")
+                        if re.match(r"^\d{3,4}\s*m$", str(price_disp).lower().strip()):
+                            price_disp = "Thương lượng"
+                        text_sec += (
+                            f"<b>{item_idx}. {it['title'][:60]}</b>\n"
+                            f"   🏷️ Giá: <code>{price_disp}</code> | 📍 {it['source']}{cmt_badge}\n"
+                            f"   🔗 <a href=\"{it['url']}\">Bấm vào đây để mở bài đăng gốc</a>\n\n"
+                        )
+                        item_idx += 1
+                    return text_sec
+
+                if fb_group_top:
+                    sections.append(render_section("👥 <b>BÀI ĐĂNG TỪ HỘI NHÓM FACEBOOK:</b>", fb_group_top))
+                if fb_mp_top:
+                    sections.append(render_section("🌐 <b>FACEBOOK MARKETPLACE:</b>", fb_mp_top))
+                if chotot_top:
+                    sections.append(render_section("🛒 <b>CHỢ TỐT:</b>", chotot_top))
+
+                full_report = "".join(sections)
                 reply_msg = (
-                    f"🎯 <b>TÌM THẤY {len(matched_items)} TIN BÁN RAM CHO:</b> <code>{keyword}</code>\n\n"
-                    f"{top_items_text}"
-                    f"<i>(Đã loại bỏ các tin cần mua, tin phụ kiện và tin rác)</i>"
+                    f"🎯 <b>TÌM THẤY {total_matched} TIN BÁN RAM PHÙ HỢP CHO:</b> <code>{keyword}</code>\n\n"
+                    f"{full_report}"
+                    f"<i>(Đã lọc bỏ tin cần mua, tin linh kiện hỏng/xác và tin rác)</i>"
                 )
                 self._send_message(chat_id, reply_msg)
 
