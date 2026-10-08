@@ -32,6 +32,10 @@ def test_is_ram_post_blocked_cases():
         ("Cần mua 2 thanh ram ddr4 16gb ai có ib", "Khu vực Cầu Giấy HN", "BUY_WANTED_POST"),
         ("Tìm mua ram ddr5 32gb ở HN", "Bác nào có ném vào đây", "BUY_WANTED_POST"),
         ("Thu mua ram cũ hỏng giá cao tận nơi", "Liên hệ sđt 098...", "BUY_WANTED_POST"),
+        # Tin bán RAM xác / lỗi / hỏng
+        ("Ram Xác - Lỗi Thanh lý nhanh gọn - Hà Nội . Qua 244 Lê Thanh Nghị mua trực tiếp .", "Bán xác linh kiện", "DEFECTIVE_OR_PARTS_RAM"),
+        ("Bán xác 10 thanh ram ddr3 cho thợ", "Thanh lý dọn kho", "DEFECTIVE_OR_PARTS_RAM"),
+        ("10 thanh ram ddr4 bị lỗi không nhận", "", "DEFECTIVE_OR_PARTS_RAM"),
         # Phụ kiện / tin rác
         ("Quạt tản nhiệt RAM RGB Jonsbo", "Phụ kiện làm mát", "INTENT_ACCESSORY"),
         # Sản phẩm khác
@@ -103,3 +107,29 @@ def test_notify_if_ram_post_hook():
     mock_raw.url = "https://www.facebook.com/groups/iphone/posts/555"
     res_iphone = notify_if_ram_post(mock_raw)
     assert res_iphone is False
+
+
+def test_clean_facebook_text():
+    """Kiểm tra việc làm sạch ký tự ẩn và rác ngắt dòng của Facebook."""
+    from app.deal_hunter.ram_bot import clean_facebook_text
+
+    raw_noisy_text = (
+        "Loan Le\n"
+        "o͏\n"
+        "e͏\n"
+        "r͏\n"
+        "o͏\n"
+        "p͏\n"
+        "s͏\n"
+        "14 giờ\n"
+        "Thanh lý kit ram DDR5 32GB 5600MHz Corsair\n"
+        "Bảo hành Mai Hoàng 3 năm\n"
+        "Xem thêm"
+    )
+
+    cleaned = clean_facebook_text(raw_noisy_text)
+    assert "o" not in [l.strip() for l in cleaned.split("\n")]
+    assert "Thanh lý kit ram DDR5 32GB 5600MHz Corsair" in cleaned
+    assert "Bảo hành Mai Hoàng 3 năm" in cleaned
+    assert "Xem thêm" not in cleaned
+    assert "14 giờ" not in cleaned

@@ -365,10 +365,14 @@ class FacebookGroupCollector(BaseCollector):
                     continue
 
                 full_text = post.get("text", "")
+                # Gỡ bỏ các ký tự ẩn / combining diacritics chống cào dữ liệu của Facebook
+                text_no_hidden = re.sub(r"[\u0300-\u036f\u200b-\u200f\ufeff]", "", full_text)
                 clean_lines = [
-                    l.strip() for l in full_text.split("\n")
-                    if l.strip() and not l.strip().lower().startswith("facebook") 
-                    and l.strip() not in ("·", "Xem thêm", "Thích", "Chia sẻ", "Bình luận")
+                    l.strip() for l in text_no_hidden.split("\n")
+                    if l.strip() and len(l.strip()) > 2
+                    and not l.strip().lower().startswith("facebook") 
+                    and l.strip() not in ("·", "Xem thêm", "Thích", "Chia sẻ", "Bình luận", "Gửi tin nhắn")
+                    and not re.match(r"^\d+\s*(?:giờ|phút|ngày|tháng|tuần)\b", l.strip().lower())
                 ]
                 
                 # Tìm dòng tiêu đề có nghĩa đầu tiên

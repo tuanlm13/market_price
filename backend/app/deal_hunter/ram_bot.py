@@ -19,15 +19,43 @@ BUY_WANTED_PATTERNS = [
     r"\b(cần mua|tìm mua|mua sll|mua lẻ|ai có|thu mua|mua lại|cần tìm|e tìm|mình tìm|bác nào có|cần cây|cần thanh|tìm thanh|mua ram)\b"
 ]
 
+DEFECTIVE_RAM_TITLE_PATTERNS = [
+    r"\b(ram xác|xác ram|bán xác|rã xác|hàng xác|xác sống|xác chết|thanh lý xác|xác lỗi|xác - lỗi)\b",
+    r"(?:^|\W)xác(?:\W|$)",
+    r"\b(ram lỗi|bị lỗi|lỗi k nhận|lỗi không nhận|chết ram|hỏng ram)\b",
+]
+
 RAM_KEYWORDS = [
     r"\b(ram|ddr5|ddr4|ddr3|pc5|pc4|pc3|pc3l|sodimm|dimm|ecc server)\b"
 ]
+
+def clean_facebook_text(text: str) -> str:
+    """Loại bỏ ký tự rác, zero-width, combining diacritics và các dòng rác từ Facebook."""
+    if not text:
+        return ""
+    # Gỡ bỏ các ký tự ẩn và dấu ghép Unicode của Facebook
+    cleaned = re.sub(r"[\u0300-\u036f\u200b-\u200f\ufeff]", "", text)
+    lines = [l.strip() for l in cleaned.split("\n") if l.strip()]
+    meaningful = []
+    for l in lines:
+        # Bỏ dòng 1-2 ký tự (chữ cái rác bị ngắt dòng từ Facebook timestamp DOM)
+        if len(l) <= 2:
+            continue
+        # Bỏ các nút bấm giao diện
+        if re.match(r"^(thích|bình luận|chia sẻ|xem thêm|gửi tin nhắn|nhắn tin|facebook|quản trị viên|người kiểm duyệt)$", l.lower()):
+            continue
+        # Bỏ timestamp
+        if re.match(r"^\d+\s*(?:giờ|phút|ngày|tháng|tuần)\b", l.lower()):
+            continue
+        meaningful.append(l)
+    return "\n".join(meaningful)
 
 def is_ram_post(title: str, description: str = "") -> Tuple[bool, str]:
     """
     Xác định bài đăng có phải là bài BÁN RAM hay không:
     - User là người mua -> Chỉ thu thập tin từ người BÁN (intent == SELL)
     - Loại bỏ tin cần mua / tìm mua
+    - Loại bỏ tin bán ram xác / ram lỗi
     - Loại bỏ tin bán cả chiếc laptop/PC mà RAM chỉ là thông số
     - Loại bỏ tin rác / phụ kiện
     """
@@ -35,11 +63,16 @@ def is_ram_post(title: str, description: str = "") -> Tuple[bool, str]:
     desc_lower = (description or "").lower().strip()
     full_text = f"{title_lower} {desc_lower}".strip()
 
-    # 1. Chặn tin rác / phụ kiện
+    # 1. Chặn tin RAM xác, RAM lỗi, rã xác hỏng
+    for pat in DEFECTIVE_RAM_TITLE_PATTERNS:
+        if re.search(pat, title_lower):
+            return False, "DEFECTIVE_OR_PARTS_RAM"
+
+    # 2. Chặn tin rác / phụ kiện khác
     if is_junk_listing(title_lower):
         return False, "JUNK_LISTING"
 
-    # 2. Chặn tin người mua (BUY / WANTED)
+    # 3. Chặn tin người mua (BUY / WANTED)
     for pat in BUY_WANTED_PATTERNS:
         if re.search(pat, title_lower) or re.search(pat, desc_lower[:120]):
             return False, "BUY_WANTED_POST"
@@ -102,9 +135,22 @@ class RamTelegramNotifier:
         title = item.get("title", "Tin bán RAM")
         price = item.get("price_text") or (f"{item['price']:,.0f} đ" if item.get("price") else "Thương lượng")
         group_name = item.get("group_name", "Hội nhóm Facebook")
+        
+        # Làm sạch nội dung mô tả khỏi các dòng rác Facebook
+        raw_desc = item.get("description") or ""
+        cleaned_desc = clean_facebook_text(raw_desc)
+        lines = [l.strip() for l in cleaned_desc.split("\n") if l.strip()]
+
         seller_name = item.get("seller_name", "Người bán")
-        desc = (item.get("description") or "").strip()
-        desc_snippet = desc[:280] + ("..." if len(desc) > 280 else "") if desc else "Không có mô tả chi tiết."
+        # Nếu seller_name chung chung mà dòng đầu là tên người (2-4 từ), dùng làm tên người bán
+        if seller_name in ("Người bán", "Người bán trên nhóm", "Thành viên nhóm") and lines:
+            first_line = lines[0]
+            words = first_line.split()
+            if 2 <= len(words) <= 4 and not re.search(r"\b(ram|ddr|gb|pc|ssd|hdd|bán|pass|giá|\d)\b", first_line.lower()):
+                seller_name = first_line
+                cleaned_desc = "\n".join(lines[1:])
+
+        desc_snippet = cleaned_desc[:280] + ("..." if len(cleaned_desc) > 280 else "") if cleaned_desc else "Không có mô tả chi tiết."
         cmt_count = item.get("comment_count", 0)
         url = item.get("url", "#")
 
@@ -155,7 +201,7 @@ class RamTelegramNotifier:
             "chat_id": chat_id,
             "text": text,
             "parse_mode": "HTML",
-            "disable_web_page_preview": False
+            "disable_web_page_preview": True  # Tắt preview link để tránh card Facebook lặp lại
         }
         if item_url and str(item_url).startswith("http"):
             payload["reply_markup"] = {
@@ -276,7 +322,7 @@ class RamTelegramBotListener:
             "chat_id": chat_id,
             "text": text,
             "parse_mode": "HTML",
-            "disable_web_page_preview": False
+            "disable_web_page_preview": True
         }
         if reply_markup:
             payload["reply_markup"] = reply_markup
