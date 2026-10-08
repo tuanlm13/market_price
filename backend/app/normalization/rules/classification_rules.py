@@ -47,7 +47,7 @@ SELL_PATTERNS = [
 # ============================================================================
 JUNK_TITLE_PATTERNS = [
     # Phụ kiện rõ ràng
-    r"\b(ốp lưng|ốp bảo vệ|khung ốp|vỏ ốp|bao da|case bảo vệ|protective case)\b",
+    r"\b(ốp lưng|ốp bảo vệ|khung ốp|khung bảo vệ|khung kim loại|khung cage|khung viền|camera cage|metal cage|vỏ ốp|bao da|case bảo vệ|protective case)\b",
     r"\b(cường lực|kính cường lực|miếng dán|dán ppf|skin|ppf)\b",
     r"\b(củ sạc|dây sạc|cáp sạc|dock sạc|sạc dự phòng|adapter)\b",
     r"\b(hộp rỗng|box rỗng|vỏ hộp|khay sim)\b",
@@ -125,8 +125,10 @@ def is_junk_listing(title: str) -> bool:
     Dùng cho bot_listener để pre-filter trước khi trả kết quả Telegram.
     """
     title_lower = (title or "").lower().strip()
+    # Loại bỏ các cụm từ mô tả máy chính kèm đồ (vd: "kèm phụ kiện", "bao gồm tất cả phụ kiện")
+    cleaned = re.sub(r"\b(bao gồm|kèm|đủ|full|gồm|tất cả|tặng)\s+(?:tất cả\s+)?phụ kiện\b", "", title_lower)
     for pat in JUNK_TITLE_PATTERNS:
-        if re.search(pat, title_lower):
+        if re.search(pat, cleaned):
             return True
     return False
 
