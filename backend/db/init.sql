@@ -1,0 +1,173 @@
+CREATE TABLE IF NOT EXISTS users (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(50) UNIQUE NOT NULL,
+    email VARCHAR(255),
+    password_hash VARCHAR(255) NOT NULL,
+    is_admin BOOLEAN DEFAULT FALSE,
+    is_super_admin BOOLEAN DEFAULT FALSE,
+    active BOOLEAN DEFAULT TRUE,
+    default_currency VARCHAR(10) DEFAULT 'GBP',
+    color_mode VARCHAR(10) DEFAULT 'light',
+    first_name VARCHAR(100) DEFAULT '',
+    last_name VARCHAR(100) DEFAULT '',
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS products (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS sources (
+    id SERIAL PRIMARY KEY,
+    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    label VARCHAR(100) NOT NULL,
+    url TEXT NOT NULL,
+    selector VARCHAR(255),
+    interval_minutes INTEGER NOT NULL DEFAULT 60,
+    active BOOLEAN DEFAULT TRUE,
+    currency VARCHAR(10) DEFAULT 'GBP',
+    exclude_from_alerts BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS price_history (
+    id SERIAL PRIMARY KEY,
+    source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    price NUMERIC(10, 2),
+    currency VARCHAR(10) DEFAULT 'GBP',
+    scraped_at TIMESTAMP DEFAULT NOW(),
+    error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS alerts (
+    id SERIAL PRIMARY KEY,
+    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    alert_type VARCHAR(20) NOT NULL CHECK (alert_type IN ('price_drop', 'all_time_low', 'price_decreased')),
+    threshold NUMERIC(10, 2),
+    enabled BOOLEAN DEFAULT TRUE,
+    in_app_messages BOOLEAN DEFAULT FALSE,
+    last_triggered_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key VARCHAR(100) PRIMARY KEY,
+    value TEXT,
+    updated_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS firefox_sites (
+    id SERIAL PRIMARY KEY,
+    domain VARCHAR(255) UNIQUE NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_price_history_source_id ON price_history(source_id);
+CREATE INDEX IF NOT EXISTS idx_price_history_scraped_at ON price_history(scraped_at);
+CREATE INDEX IF NOT EXISTS idx_sources_product_id ON sources(product_id);
+CREATE INDEX IF NOT EXISTS idx_alerts_product_id ON alerts(product_id);
+CREATE INDEX IF NOT EXISTS idx_alerts_user_id ON alerts(user_id);
+
+-- Default settings
+INSERT INTO settings (key, value) VALUES
+    ('notification_provider', 'smtp'),
+    ('gmail_address', ''),
+    ('gmail_app_password', ''),
+    ('smtp_host', ''),
+    ('smtp_port', '587'),
+    ('smtp_username', ''),
+    ('smtp_password', ''),
+    ('smtp_from_address', ''),
+    ('smtp_use_tls', 'true'),
+    ('vapid_public_key', ''),
+    ('vapid_private_key', ''),
+    ('vapid_email', ''),
+    ('alert_cooldown_hours', '24')
+ON CONFLICT (key) DO NOTHING;
+
+INSERT INTO firefox_sites (domain) VALUES ('argos.co.uk')
+ON CONFLICT (domain) DO NOTHING;
+
+-- Default admin user (password: changeme)
+INSERT INTO users (username, email, password_hash, is_admin, is_super_admin)
+VALUES (
+    'admin',
+    '',
+    '$2b$12$ynuoKRZcWVTs1068U4TifumkRkgJQuhR4KtkEjw0uII70Lzn8nn4i',
+    TRUE,
+    TRUE
+) ON CONFLICT (username) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS known_selectors (
+    id SERIAL PRIMARY KEY,
+    domain VARCHAR(255) NOT NULL,
+    selector VARCHAR(255) NOT NULL,
+    label VARCHAR(100),
+    active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(domain, selector)
+);
+
+INSERT INTO known_selectors (domain, selector, label) VALUES
+    ('amazon.co.uk', '.a-offscreen', 'Main price'),
+    ('currys.co.uk', '.prod-price', 'Main price'),
+    ('argos.co.uk', 'h2', 'Main price'),
+    ('ebay.co.uk', '.x-price-primary', 'Main price'),
+    ('overclockers.co.uk', '.price__amount', 'Main price'),
+    ('gadgetverse.co.uk', '.hM4gpp span', 'Main price'),
+    ('cclonline.com', '.fw-bold.h4', 'Main price')
+ON CONFLICT (domain, selector) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS messages (
+    id SERIAL PRIMARY KEY,
+    sender_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    subject VARCHAR(255),
+    body TEXT NOT NULL,
+    message_type VARCHAR(20) NOT NULL DEFAULT 'user' CHECK (message_type IN ('user', 'system')),
+    is_read BOOLEAN NOT NULL DEFAULT FALSE,
+    deleted_by_recipient BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_recipient_id ON messages(recipient_id);
+CREATE INDEX IF NOT EXISTS idx_messages_recipient_read ON messages(recipient_id, is_read);
+
+CREATE TABLE IF NOT EXISTS exchange_rates (
+    id SERIAL PRIMARY KEY,
+    from_currency VARCHAR(10) NOT NULL,
+    to_currency VARCHAR(10) NOT NULL,
+    rate NUMERIC(20, 8) NOT NULL,
+    fetched_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(from_currency, to_currency)
+);
+
+CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    endpoint TEXT NOT NULL,
+    p256dh TEXT NOT NULL,
+    auth TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(user_id, endpoint)
+);
+
+CREATE TABLE IF NOT EXISTS categories (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name VARCHAR(100) NOT NULL,
+    color VARCHAR(20) DEFAULT 'teal',
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(user_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS product_categories (
+    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    category_id INTEGER NOT NULL REFERENCES categories(id) ON DELETE CASCADE,
+    PRIMARY KEY(product_id, category_id)
+);

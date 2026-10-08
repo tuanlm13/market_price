@@ -1,0 +1,66 @@
+import { Link, useNavigate } from 'react-router-dom'
+import { Box, Flex, Button, Text, HStack, Badge } from '@chakra-ui/react'
+import { useAuth } from '../context/AuthContext'
+import { LogOut, LayoutDashboard, Shield, User, Settings, MessageSquare, TrendingUp } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
+import { getUnreadCount } from '../api'
+
+export default function Navbar() {
+  const { user, logout } = useAuth()
+  const navigate = useNavigate()
+
+  const { data: unreadData } = useQuery({
+    queryKey: ['unreadCount'],
+    queryFn: () => getUnreadCount().then(r => r.data),
+    refetchInterval: 60000,
+    enabled: !!user,
+  })
+  const unreadCount = unreadData?.count ?? 0
+
+  const handleLogout = () => {
+    logout()
+    navigate('/login')
+  }
+
+  return (
+    <Box bg="brand.600" px={6} position="sticky" top={0} zIndex={100}>
+      <Flex h="60px" align="center" justify="space-between">
+      <Box as={Link} to="/" display="flex" alignItems="center" gap={3} textDecoration="none">
+      <img src="/price_tracker_240x54.png" alt="PriceTracker" style={{ height: '54px', width: '240px', borderRadius: '6px' }} />
+    </Box>
+    <HStack spacing={3}>
+      <Button as={Link} to="/" variant="solid" colorScheme="blue" size="sm" leftIcon={<TrendingUp size={14} />}>
+        Market Intelligence
+      </Button>
+      <Button as={Link} to="/tracker" variant="ghost" color="white" _hover={{ bg: 'brand.700' }} size="sm" leftIcon={<LayoutDashboard size={14} />}>
+        Tracker
+      </Button>
+      {user?.is_admin && (
+        <Button as={Link} to="/admin" variant="ghost" color="white" _hover={{ bg: 'brand.700' }} size="sm" leftIcon={<Shield size={14} />}>
+          Admin
+        </Button>
+      )}
+      {user?.is_super_admin && (
+        <Button as={Link} to="/settings" variant="ghost" color="white" _hover={{ bg: 'brand.700' }} size="sm" leftIcon={<Settings size={14} />}>
+          Settings
+        </Button>
+      )}
+        <Button as={Link} to="/messages" variant="ghost" color="white" _hover={{ bg: 'brand.700' }} size="sm" leftIcon={<MessageSquare size={14} />}>
+          Messages
+          {unreadCount > 0 && (
+            <Badge colorScheme="red" ml={2} borderRadius="full" fontSize="xs">
+              {unreadCount > 99 ? '99+' : unreadCount}
+            </Badge>
+          )}
+        </Button>
+        <Button as={Link} to="/profile" variant="ghost" color="white" _hover={{ bg: 'brand.700' }} size="sm" leftIcon={<User size={14} />}>
+          Profile
+        </Button>
+      <Button variant="ghost" color="white" _hover={{ bg: 'brand.700' }} size="sm" leftIcon={<LogOut size={14} />} onClick={handleLogout}>
+        Logout
+      </Button>
+    </HStack>
+  </Flex>
+</Box>
+  )
+}

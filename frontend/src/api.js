@@ -1,0 +1,118 @@
+import axios from 'axios'
+
+const api = axios.create({ baseURL: '/api' })
+
+api.interceptors.request.use(config => {
+  const token = localStorage.getItem('token')
+  if (token) config.headers.Authorization = `Bearer ${token}`
+  return config
+})
+
+api.interceptors.response.use(
+  response => response,
+  error => {
+    if (error.response?.status === 401 && !error.config.url.includes('/users/login')) {
+      localStorage.removeItem('token')
+      window.location.href = '/login?session=expired'
+    }
+    return Promise.reject(error)
+  }
+)
+
+// Auth
+export const login = (username, password) => {
+  const form = new FormData()
+  form.append('username', username)
+  form.append('password', password)
+  return api.post('/users/login', form)
+}
+export const register = (data) => api.post('/users/register', data)
+export const getMe = () => api.get('/users/me')
+export const changePassword = (data) => api.put('/users/me/password', data)
+export const updateProfile = (data) => api.put('/users/me/profile', data)
+export const updateColorMode = (data) => api.put('/users/me/color-mode', data)
+
+// Products
+export const getProducts = () => api.get('/products')
+export const createProduct = (data) => api.post('/products', data)
+export const updateProduct = (id, data) => api.patch(`/products/${id}`, data)
+export const deleteProduct = (id) => api.delete(`/products/${id}`)
+export const getNextRunTimes = () => api.get('/products/next-run-times')
+
+// Sources
+export const getSources = (productId) => api.get(`/products/${productId}/sources`)
+export const addSource = (productId, data) => api.post(`/products/${productId}/sources`, data)
+export const updateSource = (productId, sourceId, data) => api.patch(`/products/${productId}/sources/${sourceId}`, data)
+export const deleteSource = (productId, sourceId) => api.delete(`/products/${productId}/sources/${sourceId}`)
+export const triggerSourceScrape = (sourceId) => api.post(`/prices/source/${sourceId}/scrape`)
+
+// Prices
+export const getPriceHistory = (productId) => api.get(`/prices/${productId}`)
+export const triggerScrape = (productId) => api.post(`/prices/${productId}/scrape`)
+export const deletePriceEntry = (entryId) => api.delete(`/prices/history/${entryId}`)
+
+// Alerts
+export const getAlerts = (productId) => api.get(`/alerts/${productId}`)
+export const createAlert = (productId, data) => api.post(`/alerts/${productId}`, data)
+export const deleteAlert = (alertId) => api.delete(`/alerts/${alertId}`)
+export const toggleAlert = (alertId) => api.patch(`/alerts/${alertId}/toggle`)
+export const toggleAlertInAppMessages = (alertId) => api.patch(`/alerts/${alertId}/toggle-in-app-messages`)
+
+// Admin
+export const getAdminUsers = () => api.get('/admin/users')
+export const getAdminProducts = () => api.get('/admin/products')
+export const deactivateUser = (id) => api.post(`/admin/users/${id}/deactivate`)
+export const adminUpdateUser = (id, data) => api.patch(`/admin/users/${id}`, data)
+export const getAdminProductHistory = (productId) => api.get(`/admin/products/${productId}/history`)
+export const getScrapeHealth = () => api.get('/admin/scrape-health')
+
+// Settings
+export const getSettings = () => api.get('/settings')
+export const updateSettings = (data) => api.put('/settings', { settings: data })
+export const testNotification = () => api.post('/settings/test-notification')
+
+// Known selectors
+export const getSelectors = () => api.get('/selectors')
+export const createSelector = (data) => api.post('/selectors', data)
+export const updateSelector = (id, data) => api.patch(`/selectors/${id}`, data)
+export const deleteSelector = (id) => api.delete(`/selectors/${id}`)
+
+// Firefox sites
+export const getFirefoxSites = () => api.get('/firefox-sites')
+export const addFirefoxSite = (data) => api.post('/firefox-sites', data)
+export const deleteFirefoxSite = (id) => api.delete(`/firefox-sites/${id}`)
+
+export const getCurrencies = () => api.get('/users/currencies')
+export const getExchangeRates = () => api.get('/users/exchange-rates')
+export const updateCurrency = (data) => api.put('/users/me/currency', data)
+
+// Push notifications
+export const getVapidPublicKey = () => api.get('/push/vapid-public-key')
+export const subscribePush = (data) => api.post('/push/subscribe', data)
+export const unsubscribePush = (data) => api.post('/push/unsubscribe', data)
+export const unsubscribeAllPush = () => api.delete('/push/unsubscribe-all')
+export const generateVapidKeys = () => api.post('/settings/generate-vapid-keys')
+
+// Messages
+export const getMessages = () => api.get('/messages')
+export const getUnreadCount = () => api.get('/messages/unread-count')
+export const sendMessage = (data) => api.post('/messages', data)
+export const markMessageRead = (id) => api.patch(`/messages/${id}/read`)
+export const markAllRead = () => api.patch('/messages/read-all')
+export const deleteMessage = (id) => api.delete(`/messages/${id}`)
+export const getMessageUsers = () => api.get('/messages/users')
+export const sendSystemMessage = (data) => api.post('/messages/system', data)
+
+// Categories
+export const getCategories = () => api.get('/categories')
+export const createCategory = (data) => api.post('/categories', data)
+export const updateCategory = (id, data) => api.patch(`/categories/${id}`, data)
+export const deleteCategory = (id) => api.delete(`/categories/${id}`)
+export const setProductCategories = (productId, data) => api.put(`/categories/products/${productId}`, data)
+
+// Market Intelligence
+export const getMarketAnalytics = (params) => api.get('/market/analytics', { params })
+export const getMarketExplorer = () => api.get('/market/explorer')
+export const getMarketListings = (params) => api.get('/market/listings', { params })
+export const getMarketQuality = () => api.get('/market/quality')
+export const getMarketConditions = () => api.get('/market/conditions')
