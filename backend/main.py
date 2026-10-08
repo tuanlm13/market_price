@@ -38,12 +38,20 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logging.error(f"Error starting Telegram bot listener: {e}")
 
+        from app.deal_hunter.ram_bot import ram_bot_listener
+        try:
+            ram_bot_listener.start()
+        except Exception as e:
+            logging.error(f"Error starting RAM Telegram bot listener: {e}")
+
         start_scheduler(db)
     finally:
         db.close()
     yield
     from app.deal_hunter.bot_listener import bot_listener
+    from app.deal_hunter.ram_bot import ram_bot_listener
     bot_listener.stop()
+    ram_bot_listener.stop()
 
 app = FastAPI(title="Market Price Intelligence Platform", lifespan=lifespan)
 app.add_middleware(

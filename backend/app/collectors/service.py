@@ -62,7 +62,7 @@ def schedule_market_collectors():
         "GOOFISH": "iPhone 16",
         "CHOTOT": "iphone 16",
         "FACEBOOK_MARKETPLACE": "rtx 4060",
-        "FACEBOOK_GROUPS": "chocongnghe",
+        "FACEBOOK_GROUPS": os.getenv("COLLECTOR_QUERY_FB_GROUPS", "ram"),
     }
 
     for code, interval in intervals.items():
