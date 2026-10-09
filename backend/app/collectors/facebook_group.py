@@ -4,7 +4,7 @@ import logging
 import re
 import urllib.parse
 from typing import List, Dict, Any, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from app.collectors.base import BaseCollector
 
 logger = logging.getLogger(__name__)
@@ -275,9 +275,28 @@ class FacebookGroupCollector(BaseCollector):
                             author_el = post.query_selector("h2, h3, strong, a[role='link']")
                             author = author_el.inner_text().strip() if author_el else lines[0]
 
-                            # Bóc tách giá từ bài đăng (tránh nhầm MHz thành m)
-                            price_match = re.search(r"(\d+[\d.,]*\s*(?:triệu|tr\b|củ\b|k\b|đ\b|vnd|vnđ|m(?![a-z])))", text_content, re.IGNORECASE)
+                            # Bóc tách giá từ bài đăng (tránh nhầm MHz thành m hoặc K người theo dõi)
+                            price_match = re.search(r"(\d+[\d.,]*\s*(?:triệu|tr\b|củ\b|k(?!\s*(?:người|lượt|thành|member|follow|sub|bạn))\b|đ\b|vnd|vnđ|m(?![a-z])))", text_content, re.IGNORECASE)
                             price_str = price_match.group(1) if price_match else "Thương lượng"
+
+                            # Bóc tách thời gian đăng bài
+                            post_time_text = ""
+                            time_link = post.query_selector("span[id] a[role='link'], a[href*='/posts/'] span, a[href*='permalink'] span, abbr")
+                            if time_link:
+                                aria_t = time_link.get_attribute("aria-label") or time_link.inner_text().strip()
+                                if aria_t and any(w in aria_t.lower() for w in ["phút", "giờ", "ngày", "vừa xong", "hôm qua", "tháng"]):
+                                    post_time_text = aria_t
+
+                            if not post_time_text:
+                                for l in lines:
+                                    l_s = l.strip()
+                                    if re.search(r"^(?:\d+\s*(?:phút|giờ|ngày|tuần|tháng)(?:\s*trước)?|vừa xong|hôm qua\s*lúc\s*\d+:\d+)$", l_s.lower()):
+                                        post_time_text = l_s
+                                        break
+                                    m_rel = re.search(r"\b(\d+\s*(?:phút|giờ|ngày|tuần)\s*trước|vừa xong)\b", l_s.lower())
+                                    if m_rel:
+                                        post_time_text = m_rel.group(1)
+                                        break
 
                             # Bóc tách ảnh sản phẩm
                             img_el = post.query_selector("img[src*='fbcdn']")
@@ -326,6 +345,7 @@ class FacebookGroupCollector(BaseCollector):
                                 "group_url": group_url,
                                 "text": text_content,
                                 "price": price_str,
+                                "post_time_text": post_time_text,
                                 "url": post_url,
                                 "image_url": img_url,
                                 "comments": extracted_comments
@@ -390,6 +410,34 @@ class FacebookGroupCollector(BaseCollector):
                 if not title:
                     title = clean_lines[0][:150] if clean_lines else f"{post.get('author', 'Bài đăng')} - {post.get('price', 'Thương lượng')}"
 
+                # Bóc tách thời gian đăng bài
+                post_time_str = post.get("post_time_text", "")
+                if not post_time_str:
+                    for l in text_no_hidden.split("\n"):
+                        l_clean = l.strip()
+                        if re.search(r"^(?:\d+\s*(?:phút|giờ|ngày|tuần|tháng)(?:\s*trước)?|vừa xong|hôm qua\s*lúc\s*\d+:\d+)$", l_clean.lower()):
+                            post_time_str = l_clean
+                            break
+                        m_rel = re.search(r"\b(\d+\s*(?:phút|giờ|ngày|tuần)\s*trước|vừa xong)\b", l_clean.lower())
+                        if m_rel:
+                            post_time_str = m_rel.group(1)
+                            break
+
+                published_at = post.get("published_at")
+                if not published_at:
+                    published_at = datetime.utcnow()
+                    if post_time_str:
+                        pt_low = post_time_str.lower()
+                        m_m = re.search(r"(\d+)\s*phút", pt_low)
+                        m_h = re.search(r"(\d+)\s*giờ", pt_low)
+                        m_d = re.search(r"(\d+)\s*ngày", pt_low)
+                        if m_m:
+                            published_at = datetime.utcnow() - timedelta(minutes=int(m_m.group(1)))
+                        elif m_h:
+                            published_at = datetime.utcnow() - timedelta(hours=int(m_h.group(1)))
+                        elif m_d:
+                            published_at = datetime.utcnow() - timedelta(days=int(m_d.group(1)))
+
                 parsed.append({
                     "source_listing_id": post_id,
                     "url": post.get("url") or f"https://www.facebook.com/groups/post/{post_id}",
@@ -400,12 +448,13 @@ class FacebookGroupCollector(BaseCollector):
                     "seller_name_raw": post.get("author", "Thành viên nhóm"),
                     "seller_id_raw": str(post.get("author_id", "")),
                     "location_raw": post.get("location", "Toàn quốc"),
-                    "published_at": post.get("published_at") or datetime.utcnow(),
+                    "published_at": published_at,
                     "raw_metadata": {
                         "source_platform": "facebook_groups",
                         "group_name": post.get("group_name", "Hội Nhóm Mua Bán"),
                         "group_url": post.get("group_url", ""),
                         "image_url": post.get("image_url", ""),
+                        "post_time_text": post_time_str,
                         "comment_count": len(post.get("comments", []))
                     },
                     "comments": post.get("comments", [])

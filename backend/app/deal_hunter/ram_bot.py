@@ -7,7 +7,7 @@ import threading
 import urllib.request
 import urllib.parse
 from typing import Dict, Any, Optional, Tuple, Set, List
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.normalization.rules.classification_rules import classify_listing_intent, is_junk_listing
 
@@ -50,6 +50,49 @@ def clean_facebook_text(text: str) -> str:
             continue
         meaningful.append(l)
     return "\n".join(meaningful)
+
+
+def format_time_ago(dt: Optional[datetime] = None, raw_time_str: str = "") -> str:
+    """
+    Tạo định dạng thời gian thân thiện cho bài đăng:
+    - 08:35 09/10/2026 (cách đây 15 phút)
+    - 15 phút trước (08:35 09/10/2026)
+    - Vừa xong
+    """
+    now = datetime.utcnow()
+    rel_part = raw_time_str.strip() if raw_time_str else ""
+
+    if not isinstance(dt, datetime):
+        dt = None
+
+    if not rel_part and dt:
+        delta = now - dt if now >= dt else timedelta(seconds=0)
+        secs = int(delta.total_seconds())
+        if secs < 90:
+            rel_part = "vừa xong"
+        elif secs < 3600:
+            rel_part = f"cách đây {secs // 60} phút"
+        elif secs < 86400:
+            rel_part = f"cách đây {secs // 3600} giờ"
+        else:
+            rel_part = f"cách đây {secs // 86400} ngày"
+
+    time_vn_str = ""
+    if dt:
+        # Chuyển sang giờ Việt Nam (UTC+7)
+        dt_vn = dt + timedelta(hours=7)
+        time_vn_str = dt_vn.strftime("%H:%M %d/%m/%Y")
+
+    if rel_part and time_vn_str:
+        if not rel_part.lower().startswith("cách đây") and "trước" not in rel_part.lower() and rel_part.lower() != "vừa xong":
+            rel_part = f"{rel_part} trước"
+        return f"{time_vn_str} ({rel_part})"
+    elif rel_part:
+        return rel_part
+    elif time_vn_str:
+        return time_vn_str
+    return "Vừa xong"
+
 
 def is_ram_post(title: str, description: str = "") -> Tuple[bool, str]:
     """
@@ -170,12 +213,18 @@ class RamTelegramNotifier:
         cmt_count = item.get("comment_count", 0)
         url = item.get("url", "#")
 
+        # Bóc tách và định dạng thời gian đăng bài
+        posted_at = item.get("published_at") or item.get("first_seen_at")
+        raw_time_str = item.get("post_time_text") or item.get("time_text") or ""
+        time_display = format_time_ago(posted_at, raw_time_str)
+
         msg = (
             "⚡ <b>PHÁT HIỆN BÀI ĐĂNG BÁN RAM MỚI</b> ⚡\n\n"
             f"📦 <b>Sản phẩm:</b> {title}\n"
             f"🏷️ <b>Giá rao:</b> <code>{price}</code>\n"
             f"👥 <b>Hội nhóm:</b> <b>{group_name}</b>\n"
             f"👤 <b>Người bán:</b> {seller_name}\n"
+            f"⏰ <b>Thời gian:</b> {time_display}\n"
             f"💬 <b>Bình luận:</b> {cmt_count}\n\n"
             f"📝 <b>Nội dung trích đoạn:</b>\n"
             f"<i>{desc_snippet}</i>\n\n"
@@ -267,6 +316,10 @@ def notify_if_ram_post(raw_listing: Any, group_name: str = "") -> bool:
     url = getattr(raw_listing, "url", "#")
     comments = getattr(raw_listing, "comments", []) or []
 
+    pub_at = getattr(raw_listing, "published_at", None)
+    first_seen = getattr(raw_listing, "first_seen_at", None)
+    post_time_text = meta.get("post_time_text", "")
+
     item_data = {
         "title": title,
         "description": desc,
@@ -274,7 +327,10 @@ def notify_if_ram_post(raw_listing: Any, group_name: str = "") -> bool:
         "group_name": grp,
         "seller_name": seller,
         "comment_count": len(comments),
-        "url": url
+        "url": url,
+        "published_at": pub_at,
+        "first_seen_at": first_seen,
+        "post_time_text": post_time_text
     }
 
     return ram_notifier.send_ram_sale_alert(item_data)
@@ -588,9 +644,10 @@ class RamTelegramBotListener:
                         price_disp = f"{it['price']:,.0f} đ" if it['price'] > 0 else (it['price_text'] or "Thương lượng")
                         if re.match(r"^\d{3,4}\s*m$", str(price_disp).lower().strip()):
                             price_disp = "Thương lượng"
+                        time_badge = f" | ⏰ {format_time_ago(it.get('first_seen_at'))}" if it.get("first_seen_at") else ""
                         text_sec += (
                             f"<b>{item_idx}. {it['title'][:60]}</b>\n"
-                            f"   🏷️ Giá: <code>{price_disp}</code> | 📍 {it['source']}{cmt_badge}\n"
+                            f"   🏷️ Giá: <code>{price_disp}</code> | 📍 {it['source']}{time_badge}{cmt_badge}\n"
                             f"   🔗 <a href=\"{it['url']}\">Bấm vào đây để mở bài đăng gốc</a>\n\n"
                         )
                         item_idx += 1

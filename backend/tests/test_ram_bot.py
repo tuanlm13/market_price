@@ -73,6 +73,7 @@ def test_ram_telegram_notifier_format_and_dedup():
     assert "2.400.000 đ" in last_msg
     assert "Chợ Linh Kiện Máy Tính Hà Nội" in last_msg
     assert "Nguyễn Văn A" in last_msg
+    assert "Thời gian:" in last_msg
 
     # Gửi lần 2 cùng URL: Bị chặn dedup
     sent2 = notifier.send_ram_sale_alert(item)
