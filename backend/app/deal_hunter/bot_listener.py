@@ -324,3 +324,243 @@ class TelegramBotListener:
 
 bot_listener = TelegramBotListener()
 
+
+# ============================================================================
+# GENERAL FACEBOOK POST NOTIFIER (Thông báo bài đăng Facebook mới tổng quát)
+# ============================================================================
+class TelegramGeneralFacebookNotifier:
+    """
+    Gửi thông báo các bài đăng mới (ngoài RAM: ví dụ Pocket 3, iPhone, Action cam...)
+    từ Facebook Groups hoặc Marketplace tới Bot Telegram chính.
+    """
+    def __init__(self, bot_token: Optional[str] = None, default_chat_id: Optional[str] = None):
+        self.bot_token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        raw_auth = default_chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")
+        self.default_chat_ids = [c.strip() for c in re.split(r"[,;\s]+", str(raw_auth)) if c.strip()]
+        self.default_chat_id = self.default_chat_ids[0] if self.default_chat_ids else ""
+        self._notified_urls: set = set()
+        self._notified_post_ids: set = set()
+        self._load_alerted_cache_from_db()
+
+    def _load_alerted_cache_from_db(self):
+        try:
+            from database import SessionLocal
+            from app.collectors.models import FactRawListing
+            from app.normalization.rules.classification_rules import extract_facebook_post_id
+            with SessionLocal() as db:
+                alerted = db.query(
+                    FactRawListing.source_listing_id,
+                    FactRawListing.url,
+                    FactRawListing.raw_metadata
+                ).filter(
+                    FactRawListing.raw_metadata.isnot(None)
+                ).all()
+                for lid, u, m in alerted:
+                    if isinstance(m, dict) and (m.get("facebook_alerted") or m.get("ram_alerted")):
+                        pid = extract_facebook_post_id(u or "", str(lid or ""))
+                        if pid:
+                            self._notified_post_ids.add(pid)
+                        if u:
+                            self._notified_urls.add(u)
+        except Exception as e:
+            logger.debug(f"[FB Notifier] Lỗi nạp cache từ DB: {e}")
+
+    def format_facebook_message(self, item: Dict[str, Any]) -> str:
+        import html
+        from app.deal_hunter.ram_bot import clean_facebook_text, format_time_ago
+
+        title = item.get("title", "Bài đăng mới")
+        price = item.get("price_text") or (f"{item['price']:,.0f} đ" if item.get("price") else "Thương lượng")
+        group_name = item.get("group_name", "Hội nhóm Facebook")
+
+        raw_desc = item.get("description") or ""
+        cleaned_desc = clean_facebook_text(raw_desc)
+        desc_snippet = cleaned_desc[:280] + ("..." if len(cleaned_desc) > 280 else "") if cleaned_desc else "Không có mô tả chi tiết."
+
+        seller_name = item.get("seller_name", "Người bán trên nhóm")
+        cmt_count = item.get("comment_count", 0)
+        url = item.get("url", "#")
+
+        posted_at = item.get("published_at") or item.get("first_seen_at")
+        raw_time_str = item.get("post_time_text", "")
+        time_display = format_time_ago(posted_at, raw_time_str)
+
+        safe_title = html.escape(str(title))
+        safe_price = html.escape(str(price))
+        safe_group_name = html.escape(str(group_name))
+        safe_seller_name = html.escape(str(seller_name))
+        safe_time_display = html.escape(str(time_display))
+        safe_desc = html.escape(str(desc_snippet))
+        safe_url = html.escape(str(url))
+
+        msg = (
+            "⚡ <b>PHÁT HIỆN BÀI ĐĂNG MỚI TRÊN FACEBOOK</b> ⚡\n\n"
+            f"📦 <b>Sản phẩm:</b> {safe_title}\n"
+            f"🏷️ <b>Giá rao:</b> <code>{safe_price}</code>\n"
+            f"👥 <b>Hội nhóm:</b> <b>{safe_group_name}</b>\n"
+            f"👤 <b>Người bán:</b> {safe_seller_name}\n"
+            f"⏰ <b>Thời gian:</b> {safe_time_display}\n"
+            f"💬 <b>Bình luận:</b> {cmt_count}\n\n"
+            f"📝 <b>Nội dung trích đoạn:</b>\n"
+            f"<i>{safe_desc}</i>\n\n"
+            f"🔗 <a href=\"{safe_url}\">👉 BẤM VÀO ĐÂY ĐỂ MỞ BÀI ĐĂNG FACEBOOK</a>"
+        )
+        return msg
+
+    def send_facebook_alert(self, item: Dict[str, Any]) -> bool:
+        if not self.bot_token or not self.default_chat_ids:
+            return False
+
+        from app.normalization.rules.classification_rules import extract_facebook_post_id
+        url = item.get("url", "")
+        post_id = extract_facebook_post_id(url, item.get("post_id", ""))
+
+        if post_id and post_id in self._notified_post_ids:
+            return False
+        if url and url in self._notified_urls:
+            return False
+
+        msg = self.format_facebook_message(item)
+        success_any = False
+        for cid in self.default_chat_ids:
+            if self._send_telegram(msg, cid, item_url=url):
+                success_any = True
+
+        if success_any:
+            if post_id:
+                self._notified_post_ids.add(post_id)
+            if url:
+                self._notified_urls.add(url)
+        return success_any
+
+    def _send_telegram(self, text: str, chat_id: str, item_url: str = "") -> bool:
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }
+        if item_url and str(item_url).startswith("http"):
+            payload["reply_markup"] = {
+                "inline_keyboard": [
+                    [{"text": "👉 MỞ BÀI ĐĂNG TRÊN FACEBOOK 📱", "url": item_url}]
+                ]
+            }
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                return bool(json.loads(resp.read().decode("utf-8")).get("ok"))
+        except Exception as e:
+            logger.error(f"[FB Notifier] Lỗi gửi tin nhắn Telegram: {e}")
+            return False
+
+
+general_fb_notifier = TelegramGeneralFacebookNotifier()
+
+
+def notify_if_general_facebook_post(raw_listing: Any, group_name: str = "") -> bool:
+    """
+    Hook gọi sau khi cào một bài đăng mới từ Facebook Groups hoặc Marketplace.
+    Tự động thông báo tới Telegram bot chính nếu là bài bán hợp lệ (không phải RAM - RAM do ram_bot xử lý).
+    """
+    meta = getattr(raw_listing, "raw_metadata", {}) or {}
+    if meta.get("facebook_alerted") or meta.get("ram_alerted"):
+        return False
+
+    url = getattr(raw_listing, "url", "#")
+    if not url or url == "#" or "/search" in url:
+        return False
+
+    title = getattr(raw_listing, "raw_title", "") or ""
+    desc = getattr(raw_listing, "raw_description", "") or ""
+    full_text = f"{title} {desc}".lower()
+
+    # Bỏ qua tin rác phụ kiện rõ ràng (ốp, dán màn, hộp rỗng)
+    from app.normalization.rules.classification_rules import is_junk_listing, extract_facebook_post_id, WANTED_BUY_PATTERNS, PARTS_PATTERNS
+    if is_junk_listing(title):
+        return False
+
+    # Bỏ qua tin cần mua
+    for pat in WANTED_BUY_PATTERNS:
+        if re.search(pat, full_text):
+            return False
+
+    # Bỏ qua tin xác / hỏng
+    for pat in PARTS_PATTERNS:
+        if re.search(pat, title.lower()):
+            return False
+
+    # Bỏ qua nếu là tin RAM (để ram_bot xử lý riêng)
+    from app.deal_hunter.ram_bot import is_ram_post
+    is_ram, _ = is_ram_post(title, desc)
+    if is_ram:
+        return False
+
+    post_id = extract_facebook_post_id(url, getattr(raw_listing, "source_listing_id", ""))
+    listing_id = getattr(raw_listing, "id", None)
+
+    if post_id and post_id in general_fb_notifier._notified_post_ids:
+        return False
+
+    try:
+        from database import SessionLocal
+        from app.collectors.models import FactRawListing
+        with SessionLocal() as db:
+            if post_id:
+                existing = db.query(FactRawListing).filter(
+                    FactRawListing.id != listing_id,
+                    (FactRawListing.source_listing_id == post_id) | (FactRawListing.url.like(f"%{post_id}%"))
+                ).first()
+                if existing and (existing.raw_metadata or {}).get("facebook_alerted"):
+                    return False
+    except Exception as e_chk:
+        logger.debug(f"[FB Notifier] Lỗi kiểm tra trùng lặp DB: {e_chk}")
+
+    grp = group_name or meta.get("group_name", "Hội nhóm Facebook")
+    seller = getattr(raw_listing, "seller_name_raw", None) or "Người bán trên nhóm"
+    price_text = getattr(raw_listing, "raw_price_text", None)
+    comments = getattr(raw_listing, "comments", []) or []
+
+    item_data = {
+        "title": title,
+        "description": desc,
+        "price_text": price_text,
+        "group_name": grp,
+        "seller_name": seller,
+        "comment_count": len(comments),
+        "url": url,
+        "post_id": post_id,
+        "published_at": getattr(raw_listing, "published_at", None),
+        "first_seen_at": getattr(raw_listing, "first_seen_at", None),
+        "post_time_text": meta.get("post_time_text", "")
+    }
+
+    sent = general_fb_notifier.send_facebook_alert(item_data)
+    if sent:
+        try:
+            from database import SessionLocal
+            from app.collectors.models import FactRawListing
+            from sqlalchemy.orm.attributes import flag_modified
+            with SessionLocal() as db:
+                db_item = db.query(FactRawListing).filter(FactRawListing.id == listing_id).first()
+                if db_item:
+                    if not db_item.raw_metadata:
+                        db_item.raw_metadata = {}
+                    db_item.raw_metadata["facebook_alerted"] = True
+                    db_item.raw_metadata["facebook_alerted_at"] = datetime.utcnow().isoformat()
+                    flag_modified(db_item, "raw_metadata")
+                    db.commit()
+            if hasattr(raw_listing, "raw_metadata"):
+                if not raw_listing.raw_metadata:
+                    raw_listing.raw_metadata = {}
+                raw_listing.raw_metadata["facebook_alerted"] = True
+        except Exception as e_save:
+            logger.error(f"[FB Notifier] Lỗi lưu cờ facebook_alerted vào DB: {e_save}")
+
+    return sent
+

@@ -10,7 +10,7 @@ import urllib.parse
 from typing import Dict, Any, Optional, Tuple, Set, List
 from datetime import datetime, timedelta
 
-from app.normalization.rules.classification_rules import classify_listing_intent, is_junk_listing
+from app.normalization.rules.classification_rules import classify_listing_intent, is_junk_listing, extract_facebook_post_id
 
 logger = logging.getLogger(__name__)
 
@@ -195,22 +195,31 @@ class RamTelegramNotifier:
 
         self.sent_alerts = []
         self._notified_urls: Set[str] = set()
+        self._notified_post_ids: Set[str] = set()
         self._load_alerted_cache_from_db()
 
     def _load_alerted_cache_from_db(self):
-        """Khôi phục danh sách URL bài đăng đã alert từ DB khi bot khởi động."""
+        """Khôi phục danh sách URL và Post ID đã alert từ DB khi bot khởi động."""
         try:
             from database import SessionLocal
             from app.collectors.models import FactRawListing
             with SessionLocal() as db:
-                alerted = db.query(FactRawListing.url, FactRawListing.raw_metadata).filter(
+                alerted = db.query(
+                    FactRawListing.source_listing_id,
+                    FactRawListing.url,
+                    FactRawListing.raw_metadata
+                ).filter(
                     FactRawListing.raw_metadata.isnot(None)
                 ).all()
-                for u, m in alerted:
+                for lid, u, m in alerted:
                     if isinstance(m, dict) and m.get("ram_alerted"):
+                        pid = extract_facebook_post_id(u or "", str(lid or ""))
+                        if pid:
+                            self._notified_post_ids.add(pid)
                         if u:
                             self._notified_urls.add(u)
-                            self._notified_urls.add(u.split("?")[0].rstrip("/"))
+                            if not any(g in u.lower() for g in ["permalink.php", "photo"]):
+                                self._notified_urls.add(u.split("?")[0].rstrip("/"))
         except Exception as e:
             logger.debug(f"[RAM Bot] Không thể load alerted cache từ DB: {e}")
 
@@ -272,9 +281,20 @@ class RamTelegramNotifier:
             return False
 
         url = item.get("url", "")
+        post_id = extract_facebook_post_id(url, item.get("post_id", ""))
         clean_url = url.split("?")[0].rstrip("/") if url else ""
-        if (url and url in self._notified_urls) or (clean_url and clean_url in self._notified_urls):
-            logger.info(f"[RAM Bot] Bài đăng đã được alert trước đó: {url}")
+
+        # Kiểm tra theo Post ID duy nhất
+        if post_id and post_id in self._notified_post_ids:
+            logger.info(f"[RAM Bot] Bài đăng đã alert trước đó theo post_id: {post_id}")
+            return False
+
+        if url and url in self._notified_urls:
+            logger.info(f"[RAM Bot] Bài đăng đã được alert trước đó theo full URL: {url}")
+            return False
+
+        if clean_url and not any(g in clean_url.lower() for g in ["permalink.php", "photo"]) and clean_url in self._notified_urls:
+            logger.info(f"[RAM Bot] Bài đăng đã được alert trước đó theo clean URL: {clean_url}")
             return False
 
         message_text = self.format_ram_message(item)
@@ -283,9 +303,11 @@ class RamTelegramNotifier:
             for t_chat in target_chats:
                 logger.info(f"[MOCK RAM BOT] Gửi alert RAM tới chat_id={t_chat}:\n{message_text}")
                 self.sent_alerts.append({"chat_id": t_chat, "text": message_text, "item": item})
+            if post_id:
+                self._notified_post_ids.add(post_id)
             if url:
                 self._notified_urls.add(url)
-            if clean_url:
+            if clean_url and not any(g in clean_url.lower() for g in ["permalink.php", "photo"]):
                 self._notified_urls.add(clean_url)
             return True
 
@@ -295,9 +317,11 @@ class RamTelegramNotifier:
                 success_any = True
 
         if success_any:
+            if post_id:
+                self._notified_post_ids.add(post_id)
             if url:
                 self._notified_urls.add(url)
-            if clean_url:
+            if clean_url and not any(g in clean_url.lower() for g in ["permalink.php", "photo"]):
                 self._notified_urls.add(clean_url)
         return success_any
 
@@ -363,7 +387,7 @@ ram_notifier = RamTelegramNotifier()
 
 def notify_if_ram_post(raw_listing: Any, group_name: str = "") -> bool:
     """
-    Hook gọi sau khi thu thập một bài đăng từ Facebook Group.
+    Hook gọi sau khi thu thập một bài đăng từ Facebook Group hoặc Marketplace.
     Tự động kiểm tra và báo về Telegram Bot RAM nếu thỏa mãn.
     Đảm bảo Persistent Deduplication - không bao giờ gửi lại bài cũ.
     """
@@ -384,14 +408,28 @@ def notify_if_ram_post(raw_listing: Any, group_name: str = "") -> bool:
     if not is_valid_ram:
         return False
 
-    # 2. Kiểm tra trùng lặp trong DB theo clean_url
+    # 2. Kiểm tra trùng lặp theo Post ID và URL
+    post_id = extract_facebook_post_id(url, getattr(raw_listing, "source_listing_id", ""))
     clean_url = url.split("?")[0].rstrip("/")
     listing_id = getattr(raw_listing, "id", None)
+
+    if post_id and post_id in ram_notifier._notified_post_ids:
+        logger.info(f"[RAM Bot] Post ID {post_id} đã được alert trong bộ nhớ đệm.")
+        return False
+
     try:
         from database import SessionLocal
         from app.collectors.models import FactRawListing
         with SessionLocal() as db:
-            if clean_url:
+            if post_id:
+                existing_alerted = db.query(FactRawListing).filter(
+                    FactRawListing.id != listing_id,
+                    (FactRawListing.source_listing_id == post_id) | (FactRawListing.url.like(f"%{post_id}%"))
+                ).first()
+                if existing_alerted and (existing_alerted.raw_metadata or {}).get("ram_alerted"):
+                    logger.info(f"[RAM Bot] Post ID {post_id} đã được alert trong listing {existing_alerted.id}.")
+                    return False
+            elif clean_url and not any(g in clean_url.lower() for g in ["permalink.php", "photo"]):
                 existing_alerted = db.query(FactRawListing).filter(
                     FactRawListing.url.like(f"{clean_url}%"),
                     FactRawListing.id != listing_id
@@ -419,6 +457,7 @@ def notify_if_ram_post(raw_listing: Any, group_name: str = "") -> bool:
         "seller_name": seller,
         "comment_count": len(comments),
         "url": url,
+        "post_id": post_id,
         "published_at": pub_at,
         "first_seen_at": first_seen,
         "post_time_text": post_time_text

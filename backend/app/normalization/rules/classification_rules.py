@@ -215,3 +215,35 @@ def is_relevant_to_keyword(title: str, keyword: str) -> bool:
 
     return True
 
+
+def extract_facebook_post_id(url: str, source_listing_id: str = "") -> str:
+    """
+    Trích xuất Post ID duy nhất từ Facebook URL hoặc source_listing_id.
+    Hỗ trợ các định dạng:
+    - /posts/{id}
+    - /permalink.php?story_fbid={id}
+    - fbid={id}
+    - set=pcb.{id} hoặc set=gm.{id}
+    - multi_permalinks={id}
+    """
+    if source_listing_id and str(source_listing_id).isdigit():
+        return str(source_listing_id)
+    if not url:
+        return ""
+    m = re.search(r"/posts/(\d+)", url)
+    if m:
+        return m.group(1)
+    m = re.search(r"story_fbid=(\d+)", url)
+    if m:
+        return m.group(1)
+    m = re.search(r"set=(?:gm|pcb)\.(\d+)", url)
+    if m:
+        return m.group(1)
+    m = re.search(r"multi_permalinks=(\d+)", url)
+    if m:
+        return m.group(1)
+    m = re.search(r"fbid=(\d+)", url)
+    if m:
+        return m.group(1)
+    return ""
+

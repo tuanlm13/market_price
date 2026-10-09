@@ -41,39 +41,59 @@ def run_collector_job(source_code: str, query: str = "", **kwargs):
     finally:
         db.close()
 
+def run_facebook_groups_periodic_job(source_code: str = "FACEBOOK_GROUPS", query: str = "ram, pocket 3"):
+    """
+    Quét định kỳ các hội nhóm Facebook cho danh sách từ khóa theo dõi.
+    Hỗ trợ quét đa từ khóa (ví dụ: 'ram, pocket 3') mỗi chu kỳ.
+    """
+    queries = [q.strip() for q in query.split(",") if q.strip()]
+    if not queries:
+        queries = ["ram", "pocket 3"]
+    for q in queries:
+        try:
+            logger.info(f"🔄 Periodic Facebook Group collector run for query: '{q}'")
+            run_collector_job(source_code, query=q)
+        except Exception as e:
+            logger.error(f"❌ Error in periodic Facebook Group scan for '{q}': {e}")
+
+
 def schedule_market_collectors():
     """
     Registers periodic collector jobs into APScheduler.
-    Uses replace_existing=True to prevent duplicate jobs when container restarts.
-    Configurable via environment variables.
+    Cấu hình mặc định quét Facebook Groups & Marketplace mỗi 5 phút một lần.
+    Xóa cấu hình cũ trong JobStore để cập nhật ngay chu kỳ mới.
     """
     from scheduler import scheduler
 
-    # Configurable intervals (in minutes) with defaults
+    # Chu kỳ quét (phút) - Facebook Groups & Marketplace cấu hình 5 phút / lần
     intervals = {
         "GOOFISH": int(os.getenv("COLLECTOR_INTERVAL_GOOFISH", "10")),
         "CHOTOT": int(os.getenv("COLLECTOR_INTERVAL_CHOTOT", "30")),
-        "FACEBOOK_MARKETPLACE": int(os.getenv("COLLECTOR_INTERVAL_FB_MARKETPLACE", "60")),
-        "FACEBOOK_GROUPS": int(os.getenv("COLLECTOR_INTERVAL_FB_GROUPS", "90")),
+        "FACEBOOK_MARKETPLACE": int(os.getenv("COLLECTOR_INTERVAL_FB_MARKETPLACE", "5")),
+        "FACEBOOK_GROUPS": int(os.getenv("COLLECTOR_INTERVAL_FB_GROUPS", "5")),
     }
 
-    # Query terms or targets
+    # Từ khóa quét định kỳ (mặc định quét cả ram và pocket 3)
     default_queries = {
         "GOOFISH": "iPhone 16",
         "CHOTOT": "iphone 16",
         "FACEBOOK_MARKETPLACE": "rtx 4060",
-        "FACEBOOK_GROUPS": os.getenv("COLLECTOR_QUERY_FB_GROUPS", "ram"),
+        "FACEBOOK_GROUPS": os.getenv("COLLECTOR_QUERY_FB_GROUPS", "ram, pocket 3"),
     }
 
     for code, interval in intervals.items():
         job_id = f"collector_{code.lower()}"
         existing = scheduler.get_job(job_id)
         if existing:
-            logger.info(f"Job {job_id} already scheduled, next run: {existing.next_run_time}")
-            continue
+            try:
+                scheduler.remove_job(job_id)
+                logger.info(f"Cập nhật lại job {job_id} sang chu kỳ mới ({interval} phút)")
+            except Exception as ex:
+                logger.warning(f"Không thể gỡ bỏ job cũ {job_id}: {ex}")
 
+        target_func = run_facebook_groups_periodic_job if code == "FACEBOOK_GROUPS" else run_collector_job
         scheduler.add_job(
-            run_collector_job,
+            target_func,
             trigger="interval",
             minutes=interval,
             args=[code, default_queries.get(code, "")],

@@ -213,16 +213,26 @@ class BaseCollector(ABC):
                 target_listing_id = new_listing.id
                 items_new += 1
 
-                # Tự động gửi thông báo đến Bot RAM Telegram nếu là bài đăng bán RAM từ Group FB hoặc Marketplace
+                # Tự động gửi thông báo đến Telegram Bot nếu là bài đăng mới từ Group FB hoặc Marketplace
                 if source.code in ("FACEBOOK_GROUPS", "FACEBOOK_MARKETPLACE"):
+                    grp_name = (new_listing.raw_metadata or {}).get("group_name", "")
+                    if not grp_name and source.code == "FACEBOOK_MARKETPLACE":
+                        grp_name = "Facebook Marketplace"
+                    # 1. Thử gửi bot RAM nếu là tin bán RAM
+                    sent_ram = False
                     try:
                         from app.deal_hunter.ram_bot import notify_if_ram_post
-                        grp_name = (new_listing.raw_metadata or {}).get("group_name", "")
-                        if not grp_name and source.code == "FACEBOOK_MARKETPLACE":
-                            grp_name = "Facebook Marketplace"
-                        notify_if_ram_post(new_listing, group_name=grp_name)
+                        sent_ram = notify_if_ram_post(new_listing, group_name=grp_name)
                     except Exception as ex:
                         logger.debug(f"Lỗi gửi thông báo RAM bot: {ex}")
+
+                    # 2. Nếu không phải tin RAM, gửi thông báo qua Bot chính (Pocket 3, Action cam, đồ công nghệ...)
+                    if not sent_ram:
+                        try:
+                            from app.deal_hunter.bot_listener import notify_if_general_facebook_post
+                            notify_if_general_facebook_post(new_listing, group_name=grp_name)
+                        except Exception as ex:
+                            logger.debug(f"Lỗi gửi thông báo Facebook bot: {ex}")
 
             # Persist comments if present
             comments = item.get("comments", [])

@@ -179,3 +179,77 @@ def test_multiple_chat_ids_comma_separated():
     sent_msg_cids = [m["chat_id"] for m in deal_provider.sent_messages]
     assert sent_msg_cids == ["444444", "555555"]
 
+
+def test_extract_facebook_post_id():
+    """Kiểm tra trích xuất Post ID từ mọi định dạng URL Facebook."""
+    from app.normalization.rules.classification_rules import extract_facebook_post_id
+
+    # 1. URL dạng standard posts
+    assert extract_facebook_post_id("https://www.facebook.com/groups/3434490203447677/posts/4659368897626462") == "4659368897626462"
+    assert extract_facebook_post_id("https://www.facebook.com/groups/ram/posts/123456/") == "123456"
+
+    # 2. URL dạng permalink story_fbid
+    assert extract_facebook_post_id("https://www.facebook.com/permalink.php?story_fbid=987654321&id=1000") == "987654321"
+
+    # 3. URL dạng photo set=pcb hoặc set=gm
+    assert extract_facebook_post_id("https://www.facebook.com/photo/?fbid=111&set=pcb.555666777") == "555666777"
+    assert extract_facebook_post_id("https://www.facebook.com/photo/?fbid=111&set=gm.444333222") == "444333222"
+
+    # 4. Khi có source_listing_id sẵn
+    assert extract_facebook_post_id("https://www.facebook.com/some_page", source_listing_id="999888") == "999888"
+
+
+def test_notify_if_general_facebook_post():
+    """Kiểm tra thông báo bài đăng Facebook tổng quát (Pocket 3, Action cam...) và deduplication."""
+    from app.deal_hunter.bot_listener import notify_if_general_facebook_post, general_fb_notifier
+
+    mock_raw = MagicMock()
+    mock_raw.id = 9991
+    mock_raw.source_listing_id = "4659368897626462"
+    mock_raw.raw_title = "Cần bán DJI Osmo Pocket 3 combo đẹp keng"
+    mock_raw.raw_description = "Bảo hành 2027, hoạt động hoàn hảo mọi tính năng"
+    mock_raw.raw_price_text = "7.700.000 đ"
+    mock_raw.seller_name_raw = "Hiep"
+    mock_raw.url = "https://www.facebook.com/groups/3434490203447677/posts/4659368897626462"
+    mock_raw.raw_metadata = {"group_name": "Pocket 4P-Pocket 4- Insta Luna Việt Nam"}
+    mock_raw.comments = []
+
+    # Mock Telegram bot
+    general_fb_notifier.bot_token = "mock_token"
+    general_fb_notifier.default_chat_ids = ["chat_123"]
+    general_fb_notifier._notified_post_ids.clear()
+    general_fb_notifier._notified_urls.clear()
+    general_fb_notifier._send_telegram = MagicMock(return_value=True)
+
+    # 1. Bài bán Pocket 3 hợp lệ -> Gửi alert thành công
+    res = notify_if_general_facebook_post(mock_raw, group_name="Pocket 4P-Pocket 4- Insta Luna Việt Nam")
+    assert res is True
+    assert general_fb_notifier._send_telegram.call_count == 1
+    sent_text = general_fb_notifier._send_telegram.call_args[0][0]
+    assert "PHÁT HIỆN BÀI ĐĂNG MỚI TRÊN FACEBOOK" in sent_text
+    assert "DJI Osmo Pocket 3" in sent_text
+    assert "7.700.000 đ" in sent_text
+
+    # 2. Gửi lần 2: Đã lưu post_id vào cache -> Bị chặn trùng lặp
+    res2 = notify_if_general_facebook_post(mock_raw)
+    assert res2 is False
+    assert general_fb_notifier._send_telegram.call_count == 1
+
+    # 3. Tin tìm mua -> Bị lọc bỏ
+    mock_buy = MagicMock()
+    mock_buy.raw_title = "Cần mua Pocket 3 cũ"
+    mock_buy.raw_description = "Ai có pass e với"
+    mock_buy.url = "https://facebook.com/groups/1/posts/888"
+    mock_buy.raw_metadata = {}
+    res_buy = notify_if_general_facebook_post(mock_buy)
+    assert res_buy is False
+
+    # 4. Tin RAM -> Bị bỏ qua (vì ram_bot xử lý)
+    mock_ram = MagicMock()
+    mock_ram.raw_title = "Bán thanh ram DDR4 16GB"
+    mock_ram.raw_description = "Ram PC kingston"
+    mock_ram.url = "https://facebook.com/groups/1/posts/999"
+    mock_ram.raw_metadata = {}
+    res_ram = notify_if_general_facebook_post(mock_ram)
+    assert res_ram is False
+
