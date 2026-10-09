@@ -148,10 +148,32 @@ def is_relevant_to_keyword(title: str, keyword: str) -> bool:
     if is_junk_listing(title):
         return False
 
-    # Bước 2: Tất cả các từ keyword phải xuất hiện trong title
-    kw_parts = [p.strip() for p in kw_lower.split() if p.strip()]
-    if not all(part in title_lower for part in kw_parts):
-        return False
+    # Bước 2: Kiểm tra từ khóa sản phẩm cốt lõi
+    # 2.1 Xử lý đặc thù cho dòng máy quay bỏ túi (Pocket 3, Pocket 2, Pocket 4...)
+    pocket_match = re.search(r"pocket\s*(\d+)", kw_lower)
+    if pocket_match:
+        pocket_num = pocket_match.group(1)
+        # Bắt buộc phải có chữ "pocket" và số phiên bản (hoặc pocket3)
+        has_pocket = bool(re.search(r"\bpocket\b", title_lower))
+        has_num = bool(re.search(rf"\b{pocket_num}\b", title_lower) or re.search(rf"pocket\s*{pocket_num}", title_lower))
+        if not (has_pocket and has_num):
+            return False
+        # Chặn nếu là phiên bản pocket khác (ví dụ tìm pocket 3 nhưng title ghi rõ pocket 4, pocket 2)
+        other_nums = [n for n in ["1", "2", "3", "4", "5"] if n != pocket_num]
+        for on in other_nums:
+            if re.search(rf"\bpocket\s*{on}\b", title_lower):
+                return False
+    else:
+        # 2.2 Cho phép thương hiệu tiền tố (dji, osmo, apple) là tùy chọn nếu các từ định danh cốt lõi đã đủ
+        optional_brands = {"dji", "osmo", "apple"}
+        core_kw_parts = [p for p in kw_lower.split() if p and p not in optional_brands]
+        if len(core_kw_parts) >= 2:
+            if not all(part in title_lower for part in core_kw_parts):
+                return False
+        else:
+            kw_parts = [p.strip() for p in kw_lower.split() if p.strip()]
+            if not all(part in title_lower for part in kw_parts):
+                return False
 
     # Bước 3: Kiểm tra tính nhất quán đặc tả (spec consistency)
     # RAM generation guard

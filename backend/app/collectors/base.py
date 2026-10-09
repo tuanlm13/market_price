@@ -257,11 +257,11 @@ class BaseCollector(ABC):
             "comments": comments_saved
         }
 
-    def run(self, db: Session, query: str = "") -> Dict[str, Any]:
+    def run(self, db: Session, query: str = "", **kwargs) -> Dict[str, Any]:
         """Lifecycle method: update health, fetch, parse, persist."""
         self.update_health(db, status="RUNNING")
         try:
-            raw_data = self.fetch(query)
+            raw_data = self.fetch(query, **kwargs)
             parsed_items = self.parse(raw_data)
             stats = self.persist(parsed_items, db)
             self.update_health(

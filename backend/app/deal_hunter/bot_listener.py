@@ -117,26 +117,34 @@ class TelegramBotListener:
             self._send_message(chat_id, welcome)
             return
 
+        # Nhận diện nếu người dùng dán kèm link nhóm Facebook cụ thể
+        target_group_url = ""
+        group_match = re.search(r"https?://(?:www\.)?facebook\.com/groups/[^/\s]+/?", text)
+        if group_match:
+            target_group_url = group_match.group(0)
+            text = text.replace(target_group_url, "").strip(" :;=-")
+            text_lower = text.lower()
+
         # Nhận diện lệnh tìm giá
         keyword = ""
-        prefixes = ["tìm giá", "tim gia", "giá", "gia", "/find", "/tim", "/gia"]
+        prefixes = ["tìm giá", "tim gia", "giá", "gia", "tìm", "tim", "/find", "/tim", "/gia"]
         for p in prefixes:
             if text_lower.startswith(p):
                 keyword = text[len(p):].strip(" :;=-")
                 break
 
-        if not keyword and len(text.split()) <= 5 and not text.startswith("/"):
-            # Nếu người dùng chỉ gõ ngắn gọn "iphone 16 plus"
+        if not keyword and not text.startswith("/"):
             keyword = text.strip()
 
         if keyword:
-            self._execute_search_and_reply(chat_id, keyword)
+            self._execute_search_and_reply(chat_id, keyword, target_group_url=target_group_url)
 
-    def _execute_search_and_reply(self, chat_id: str, keyword: str):
+    def _execute_search_and_reply(self, chat_id: str, keyword: str, target_group_url: str = ""):
         # 1. Thông báo ngay cho user
+        grp_note = f"\n🎯 <i>Đang ưu tiên quét trực tiếp nhóm:</i> <code>{target_group_url}</code>" if target_group_url else ""
         self._send_message(
             chat_id,
-            f"🔍 <b>Đang quét thị trường cho:</b> <code>{keyword}</code>\n"
+            f"🔍 <b>Đang quét thị trường cho:</b> <code>{keyword}</code>{grp_note}\n"
             f"⏳ Đang thu thập tin mới nhất từ <b>Facebook Marketplace</b>, <b>Hội Nhóm Facebook</b> & <b>Chợ Tốt</b>, vui lòng đợi giây lát..."
         )
 
@@ -149,10 +157,10 @@ class TelegramBotListener:
             from app.normalization.models import FactNormalizedListing
             from sqlalchemy import desc
 
-            # 2. Cào dữ liệu từ cả 3 nguồn
-            logger.info(f"BotListener: Bắt đầu cào cho từ khóa '{keyword}' trên Marketplace, Groups & Chợ Tốt")
+            # 2. Cào dữ liệu từ cả 3 nguồn (truyền target_group_url nếu có)
+            logger.info(f"BotListener: Bắt đầu cào cho từ khóa '{keyword}' trên Marketplace, Groups & Chợ Tốt (group: {target_group_url})")
             run_collector_job("FACEBOOK_MARKETPLACE", query=keyword)
-            run_collector_job("FACEBOOK_GROUPS", query=keyword)
+            run_collector_job("FACEBOOK_GROUPS", query=keyword, target_group_url=target_group_url)
             run_collector_job("CHOTOT", query=keyword)
 
             # 3. Chuẩn hóa dữ liệu
@@ -161,7 +169,6 @@ class TelegramBotListener:
                 process_batch_listings(db, limit=40)
 
                 # 4. Ưu tiên lấy từ FactNormalizedListing (đã qua pipeline classification)
-                # Chỉ lấy tin SELL + có product_id + giá hợp lệ
                 normalized_recent = (
                     db.query(FactNormalizedListing)
                     .filter(
@@ -183,9 +190,10 @@ class TelegramBotListener:
                         continue
 
                     title = raw.raw_title or ""
+                    full_text = f"{title} {raw.raw_description or ''}"
 
-                    # FILTER CHÍNH XÁC: Dùng is_relevant_to_keyword thay vì matching lỏng lẻo
-                    if not is_relevant_to_keyword(title, keyword):
+                    # FILTER CHÍNH XÁC: Kiểm tra cả tiêu đề và đoạn đầu mô tả
+                    if not is_relevant_to_keyword(title, keyword) and not is_relevant_to_keyword(full_text[:280], keyword):
                         continue
 
                     # Chống trùng URL
@@ -225,7 +233,8 @@ class TelegramBotListener:
                     )
                     for item in all_recent:
                         title = item.raw_title or ""
-                        if not is_relevant_to_keyword(title, keyword):
+                        full_item_text = f"{title} {item.raw_description or ''}"
+                        if not is_relevant_to_keyword(title, keyword) and not is_relevant_to_keyword(full_item_text[:280], keyword):
                             continue
 
                         if item.url in seen_urls:

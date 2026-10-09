@@ -18,8 +18,9 @@ class FacebookGroupCollector(BaseCollector):
     TOPIC_SYNONYMS = {
         "ram": ["ram", "linh kiện", "pc", "laptop", "máy tính", "ổ cứng", "ssd", "hdd", "ddr", "phần cứng"],
         "laptop": ["laptop", "pc", "máy tính", "linh kiện", "dell", "thinkpad", "macbook"],
-        "dji": ["dji", "pocket", "action cam", "action", "osmo", "camera", "gopro", "insta360", "flycam", "quay phim"],
-        "pocket": ["pocket", "dji", "action cam", "action", "osmo", "camera", "gopro", "insta360"],
+        "dji": ["dji", "pocket", "action cam", "action", "osmo", "camera", "gopro", "insta360", "flycam", "quay phim", "luna"],
+        "pocket": ["pocket", "dji", "action cam", "action", "osmo", "camera", "gopro", "insta360", "luna"],
+        "osmo": ["osmo", "pocket", "dji", "action cam", "action", "camera", "gopro", "insta360"],
         "iphone": ["iphone", "apple", "ipad", "macbook", "ios", "điện thoại", "smartphone"],
         "robot": ["robot", "hút bụi", "lau nhà", "ecovacs", "roborock", "dreame", "tineco", "mova"],
         "sạc": ["sạc", "pin", "anker", "cuktech", "ugreen", "shargeek", "dự phòng", "cáp"],
@@ -120,17 +121,23 @@ class FacebookGroupCollector(BaseCollector):
             # 1. Khớp từ khóa trực tiếp
             for t in tokens:
                 if t in g_name_lower:
-                    score += 10
+                    score += 15
 
             # 2. Khớp từ đồng nghĩa / lĩnh vực liên quan
             for term in expanded_terms:
                 if term in g_name_lower:
-                    score += 3
+                    score += 5
+
+            # 2.1 Ưu tiên cực cao cho các dòng thiết bị đặc thù (pocket, action cam, rtx, thinkpad, robot...)
+            spec_keywords = ["pocket", "action cam", "action camera", "rtx", "thinkpad", "macbook", "ecovacs", "roborock", "cuktech"]
+            for sk in spec_keywords:
+                if sk in q_lower and sk in g_name_lower:
+                    score += 30
 
             # 3. Ưu tiên các nhóm mua bán, chợ, thanh lý
             trade_keywords = ["mua bán", "chợ", "thanh lý", "trao đổi", "giao lưu", "deal"]
             if any(tk in g_name_lower for tk in trade_keywords):
-                score += 2
+                score += 5
 
             if score > 0:
                 scored_groups.append((score, g))
@@ -200,14 +207,20 @@ class FacebookGroupCollector(BaseCollector):
 
         return comments
 
-    def fetch(self, query: str = "ram") -> List[Dict[str, Any]]:
+    def fetch(self, query: str = "ram", target_group_url: str = "", **kwargs) -> List[Dict[str, Any]]:
         """
         Tìm kiếm trên các hội nhóm Facebook đã tham gia liên quan đến từ khóa và đọc bình luận.
-        Ví dụ:
-        - query='ram laptop' -> Quét các nhóm mua bán RAM, linh kiện máy tính đã tham gia
-        - query='dji pocket 3' -> Quét các nhóm mua bán DJI, Action cam đã tham gia
+        Hỗ trợ chỉ định quét trực tiếp một nhóm cụ thể qua target_group_url hoặc truyền kèm URL trong query.
         """
         items: List[Dict[str, Any]] = []
+
+        # Tự động trích xuất group URL nếu người dùng dán kèm link nhóm vào trong query
+        group_url_match = re.search(r"https?://(?:www\.)?facebook\.com/groups/[^/\s]+/?", query)
+        if group_url_match and not target_group_url:
+            target_group_url = group_url_match.group(0)
+            query = query.replace(target_group_url, "").strip(" :;=-")
+            if not query:
+                query = "pocket"
 
         try:
             from playwright.sync_api import sync_playwright
@@ -218,15 +231,39 @@ class FacebookGroupCollector(BaseCollector):
                 # 1. Tải danh sách nhóm đã tham gia
                 joined_groups = self.load_joined_groups(page=page)
                 
-                # 2. Lọc các nhóm liên quan đến từ khóa (tăng lên 5 nhóm để đa dạng nguồn tin)
-                target_groups = self.get_relevant_joined_groups(query, joined_groups, max_groups=5)
+                # 2. Lọc các nhóm liên quan đến từ khóa (tăng lên 6 nhóm để đa dạng nguồn tin)
+                target_groups = self.get_relevant_joined_groups(query, joined_groups, max_groups=6)
+
+                # Nếu có nhóm chỉ định cụ thể, ưu tiên đưa lên đầu tiên
+                if target_group_url and "/groups/" in target_group_url:
+                    clean_target = target_group_url.split("?")[0].rstrip("/")
+                    tg_name = "Nhóm Được Chỉ Định"
+                    found_in_cache = False
+                    for jg in joined_groups:
+                        if clean_target in jg.get("url", "") or jg.get("url", "").rstrip("/") == clean_target:
+                            tg_name = jg.get("name", tg_name)
+                            found_in_cache = True
+                            break
+                    target_obj = {"name": tg_name, "url": clean_target}
+                    target_groups = [target_obj] + [g for g in target_groups if clean_target not in g.get("url", "")]
+                    
+                    # Nếu nhóm mới chưa có trong cache joined_groups, tự động bổ sung vào cache
+                    if not found_in_cache:
+                        joined_groups.append(target_obj)
+                        cache_file = self._get_cache_path()
+                        try:
+                            with open(cache_file, "w", encoding="utf-8") as f:
+                                json.dump(joined_groups, f, ensure_ascii=False, indent=2)
+                        except Exception:
+                            pass
+
                 if not target_groups:
                     logger.warning(f"[{self.source_code}] Không tìm thấy nhóm đã tham gia phù hợp cho '{query}'")
                     # Fallback tìm kiếm chung trên Search Posts toàn Facebook
                     encoded_q = urllib.parse.quote(query.strip())
                     target_groups = [{"name": "Facebook Search Posts", "url": f"https://www.facebook.com/search/posts?q={encoded_q}"}]
 
-                logger.info(f"[{self.source_code}] Sẽ quét {len(target_groups)} nhóm liên quan cho từ khóa '{query}': {[g['name'] for g in target_groups]}")
+                logger.info(f"[{self.source_code}] Sẽ quét {len(target_groups)} nhóm cho từ khóa '{query}': {[g['name'] for g in target_groups]}")
 
                 # 3. Quét từng nhóm liên quan
                 for group in target_groups:

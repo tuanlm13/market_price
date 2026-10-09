@@ -26,13 +26,13 @@ def get_collector(source_code: str) -> BaseCollector:
         raise ValueError(f"Unknown collector source code: {source_code}")
     return cls()
 
-def run_collector_job(source_code: str, query: str = ""):
+def run_collector_job(source_code: str, query: str = "", **kwargs):
     """Entry point called by scheduler or API trigger."""
     db: Session = SessionLocal()
     try:
         collector = get_collector(source_code)
-        logger.info(f"🚀 Starting background collector run: {source_code} (query='{query}')")
-        result = collector.run(db, query=query)
+        logger.info(f"🚀 Starting background collector run: {source_code} (query='{query}', kwargs={kwargs})")
+        result = collector.run(db, query=query, **kwargs)
         logger.info(f"🏁 Finished collector run: {source_code} - Result: {result}")
         return result
     except Exception as e:
