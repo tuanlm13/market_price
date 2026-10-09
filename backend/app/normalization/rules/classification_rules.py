@@ -1,5 +1,6 @@
 import re
-from typing import Tuple, List
+from typing import Tuple, List, Optional
+from datetime import datetime, timedelta
 
 SPAM_KEYWORDS = [
     "vay tiền", "tuyển dụng", "việc làm", "cho vay", "tài chính", "sim số đẹp",
@@ -246,4 +247,137 @@ def extract_facebook_post_id(url: str, source_listing_id: str = "") -> str:
     if m:
         return m.group(1)
     return ""
+
+
+def parse_facebook_time(
+    raw_text: str = "",
+    aria_label: str = "",
+    reference_time: Optional[datetime] = None
+) -> Tuple[Optional[datetime], str]:
+    """
+    Bóc tách thời gian đăng bài thật của Facebook từ chuỗi text hoặc aria-label.
+    Hỗ trợ:
+    - Vừa xong / just now
+    - Phút: N phút / N phút trước
+    - Giờ: N giờ / N giờ trước
+    - Hôm qua: hôm qua lúc H:M
+    - Ngày: N ngày / N ngày trước
+    - Ngày cụ thể trong năm: 18 tháng 9 / 18 thg 9 / 19 Tháng 9 lúc 04:40
+    - Tuần: N tuần / N tuần trước
+    - Tháng: N tháng trước
+    """
+    now = reference_time or datetime.utcnow()
+    combined = f"{aria_label} {raw_text}".strip()
+    if not combined:
+        return None, ""
+
+    # Gỡ bỏ các ký tự ẩn zero-width và combining diacritics chống cào dữ liệu của Facebook
+    clean = re.sub(r'[\u0300-\u036f\u200b-\u200f\ufeff\u034f]', '', combined)
+    clean_lower = clean.lower()
+
+    # 1. "vừa xong" / "just now"
+    if "vừa xong" in clean_lower or "just now" in clean_lower:
+        return now, "vừa xong"
+
+    # 2. Phút: "15 phút" / "15 phút trước" / "15 mins"
+    m_min = re.search(r"(\d+)\s*(?:phút|min|m\b)", clean_lower)
+    if m_min and not re.search(r"\b\d+\s*(?:ngày|tháng|tuần)", clean_lower):
+        mins = int(m_min.group(1))
+        dt = now - timedelta(minutes=mins)
+        return dt, f"{mins} phút trước"
+
+    # 3. Giờ: "2 giờ" / "2 giờ trước" / "2 hrs"
+    m_hr = re.search(r"(\d+)\s*(?:giờ|tiếng|hr|h\b)", clean_lower)
+    if m_hr and not re.search(r"\b\d+\s*(?:ngày|tháng|tuần)", clean_lower):
+        hrs = int(m_hr.group(1))
+        dt = now - timedelta(hours=hrs)
+        return dt, f"{hrs} giờ trước"
+
+    # 4. Hôm qua: "hôm qua lúc 14:30" / "yesterday at 14:30"
+    if "hôm qua" in clean_lower or "yesterday" in clean_lower:
+        m_time = re.search(r"(\d{1,2}):(\d{2})", clean)
+        hour = int(m_time.group(1)) if m_time else 12
+        minute = int(m_time.group(2)) if m_time else 0
+        now_vn = now + timedelta(hours=7)
+        dt_vn = now_vn - timedelta(days=1)
+        dt_vn = dt_vn.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        dt_utc = dt_vn - timedelta(hours=7)
+        time_str = f"hôm qua lúc {hour:02d}:{minute:02d}" if m_time else "hôm qua"
+        return dt_utc, time_str
+
+    # 5. Ngày cụ thể trong năm (Tiếng Việt & Tiếng Anh):
+    # VD: "Thứ bảy, 19 Tháng 9, 2026 lúc 04:40" hoặc "18 tháng 9 lúc 15:30" hoặc "18 thg 9" hoặc "18 Sep"
+    m_date = re.search(
+        r"(\d{1,2})\s*(?:tháng|thg)\s*(\d{1,2})(?:[,\s]*(\d{4}))?(?:\s*lúc\s*(\d{1,2}):(\d{2}))?",
+        clean_lower
+    )
+    if m_date:
+        day = int(m_date.group(1))
+        month = int(m_date.group(2))
+        now_vn = now + timedelta(hours=7)
+        year = int(m_date.group(3)) if m_date.group(3) else now_vn.year
+        hour = int(m_date.group(4)) if m_date.group(4) else 12
+        minute = int(m_date.group(5)) if m_date.group(5) else 0
+
+        # Nếu không ghi năm mà tháng lớn hơn tháng hiện tại -> ngày thuộc năm trước
+        if not m_date.group(3) and month > now_vn.month:
+            year -= 1
+
+        try:
+            dt_vn = datetime(year, month, day, hour, minute)
+            dt_utc = dt_vn - timedelta(hours=7)
+            time_str = f"{day:02d}/{month:02d}/{year}"
+            if m_date.group(4):
+                time_str = f"{hour:02d}:{minute:02d} {time_str}"
+            return dt_utc, time_str
+        except ValueError:
+            pass
+
+    # Tiếng Anh: "September 18 at 4:40 AM" / "18 September" / "18 Sep"
+    months_en = {
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+        "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12
+    }
+    m_en = re.search(
+        r"(?:(\d{1,2})\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*|(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{1,2}))(?:[,\s]*(\d{4}))?",
+        clean_lower
+    )
+    if m_en:
+        day = int(m_en.group(1) or m_en.group(4))
+        mon_str = (m_en.group(2) or m_en.group(3))[:3]
+        month = months_en.get(mon_str, 1)
+        now_vn = now + timedelta(hours=7)
+        year = int(m_en.group(5)) if m_en.group(5) else now_vn.year
+        if not m_en.group(5) and month > now_vn.month:
+            year -= 1
+        try:
+            dt_vn = datetime(year, month, day, 12, 0)
+            dt_utc = dt_vn - timedelta(hours=7)
+            return dt_utc, f"{day:02d}/{month:02d}/{year}"
+        except ValueError:
+            pass
+
+    # 6. Ngày trước: "3 ngày" / "3 ngày trước" / "3 days"
+    m_day = re.search(r"(\d+)\s*(?:ngày|day|d\b)", clean_lower)
+    if m_day and not re.search(r"(?:tháng|thg)", clean_lower):
+        days = int(m_day.group(1))
+        dt = now - timedelta(days=days)
+        return dt, f"{days} ngày trước"
+
+    # 7. Tuần: "2 tuần" / "2 tuần trước" / "2 weeks"
+    m_wk = re.search(r"(\d+)\s*(?:tuần|week|w\b)", clean_lower)
+    if m_wk:
+        weeks = int(m_wk.group(1))
+        dt = now - timedelta(weeks=weeks)
+        return dt, f"{weeks} tuần trước"
+
+    # 8. Tháng trước: "1 tháng trước"
+    m_mon = re.search(r"(\d+)\s*(?:tháng|month)\s*trước", clean_lower)
+    if m_mon:
+        mons = int(m_mon.group(1))
+        dt = now - timedelta(days=30 * mons)
+        return dt, f"{mons} tháng trước"
+
+    return None, clean[:60]
+
 

@@ -58,7 +58,8 @@ def format_time_ago(dt: Optional[datetime] = None, raw_time_str: str = "") -> st
     Tạo định dạng thời gian thân thiện cho bài đăng:
     - 08:35 09/10/2026 (cách đây 15 phút)
     - 15 phút trước (08:35 09/10/2026)
-    - Vừa xong
+    - 18/09/2026 (cách đây 3 tuần)
+    - Không rõ thời gian
     """
     now = datetime.utcnow()
     rel_part = raw_time_str.strip() if raw_time_str else ""
@@ -66,33 +67,39 @@ def format_time_ago(dt: Optional[datetime] = None, raw_time_str: str = "") -> st
     if not isinstance(dt, datetime):
         dt = None
 
-    if not rel_part and dt:
+    delta_secs = None
+    if dt:
         delta = now - dt if now >= dt else timedelta(seconds=0)
-        secs = int(delta.total_seconds())
-        if secs < 90:
+        delta_secs = int(delta.total_seconds())
+
+    if not rel_part and delta_secs is not None:
+        if delta_secs < 90:
             rel_part = "vừa xong"
-        elif secs < 3600:
-            rel_part = f"cách đây {secs // 60} phút"
-        elif secs < 86400:
-            rel_part = f"cách đây {secs // 3600} giờ"
+        elif delta_secs < 3600:
+            rel_part = f"cách đây {delta_secs // 60} phút"
+        elif delta_secs < 86400:
+            rel_part = f"cách đây {delta_secs // 3600} giờ"
+        elif delta_secs < 7 * 86400:
+            rel_part = f"cách đây {delta_secs // 86400} ngày"
+        elif delta_secs < 30 * 86400:
+            rel_part = f"cách đây {delta_secs // (7 * 86400)} tuần"
         else:
-            rel_part = f"cách đây {secs // 86400} ngày"
+            rel_part = f"cách đây {delta_secs // (30 * 86400)} tháng"
 
     time_vn_str = ""
     if dt:
-        # Chuyển sang giờ Việt Nam (UTC+7)
         dt_vn = dt + timedelta(hours=7)
         time_vn_str = dt_vn.strftime("%H:%M %d/%m/%Y")
 
     if rel_part and time_vn_str:
-        if not rel_part.lower().startswith("cách đây") and "trước" not in rel_part.lower() and rel_part.lower() != "vừa xong":
+        if re.match(r"^\d+\s*(?:phút|giờ|ngày|tuần|tháng)$", rel_part.lower()):
             rel_part = f"{rel_part} trước"
         return f"{time_vn_str} ({rel_part})"
     elif rel_part:
         return rel_part
     elif time_vn_str:
         return time_vn_str
-    return "Vừa xong"
+    return "Không rõ thời gian"
 
 
 def is_ram_post(title: str, description: str = "") -> Tuple[bool, str]:
@@ -448,6 +455,51 @@ def notify_if_ram_post(raw_listing: Any, group_name: str = "") -> bool:
     pub_at = getattr(raw_listing, "published_at", None)
     first_seen = getattr(raw_listing, "first_seen_at", None)
     post_time_text = meta.get("post_time_text", "")
+
+    # =========================================================================
+    # RECENCY GUARD: Chỉ gửi alert cho bài đăng MỚI trong vòng 48 giờ (2 ngày)
+    # Loại bỏ triệt để các bài đăng cũ từ tuần trước / tháng trước được tìm thấy qua Group Search
+    # =========================================================================
+    now_utc = datetime.utcnow()
+    is_too_old = False
+    old_reason = ""
+
+    if pub_at and isinstance(pub_at, datetime):
+        age_hours = (now_utc - pub_at).total_seconds() / 3600.0
+        if age_hours > 48:
+            is_too_old = True
+            old_reason = f"published_at={pub_at.isoformat()} ({age_hours:.1f}h trước)"
+    elif post_time_text:
+        pt_low = post_time_text.lower()
+        if any(w in pt_low for w in ["tuần", "tháng", "week", "month"]):
+            is_too_old = True
+            old_reason = f"post_time_text='{post_time_text}'"
+        else:
+            m_days = re.search(r"(\d+)\s*(?:ngày|day)", pt_low)
+            if m_days and int(m_days.group(1)) >= 2:
+                is_too_old = True
+                old_reason = f"post_time_text='{post_time_text}'"
+
+    if is_too_old:
+        logger.info(f"[RAM Bot] Bỏ qua bài đăng cũ (> 48h): id={listing_id}, title='{title[:40]}...', lý do: {old_reason}")
+        try:
+            from database import SessionLocal
+            from app.collectors.models import FactRawListing
+            from sqlalchemy.orm.attributes import flag_modified
+            with SessionLocal() as db:
+                db_item = db.query(FactRawListing).filter(FactRawListing.id == listing_id).first()
+                if db_item:
+                    if not db_item.raw_metadata:
+                        db_item.raw_metadata = {}
+                    db_item.raw_metadata["ram_alerted"] = True
+                    db_item.raw_metadata["ram_skipped_old"] = True
+                    flag_modified(db_item, "raw_metadata")
+                    db.commit()
+            if hasattr(raw_listing, "raw_metadata") and isinstance(raw_listing.raw_metadata, dict):
+                raw_listing.raw_metadata["ram_alerted"] = True
+        except Exception as e_skip:
+            logger.debug(f"[RAM Bot] Lỗi cập nhật cờ skip bài cũ: {e_skip}")
+        return False
 
     item_data = {
         "title": title,

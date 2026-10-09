@@ -6,6 +6,7 @@ import urllib.parse
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from app.collectors.base import BaseCollector
+from app.normalization.rules.classification_rules import parse_facebook_time
 
 logger = logging.getLogger(__name__)
 
@@ -362,24 +363,33 @@ class FacebookGroupCollector(BaseCollector):
                             price_match = re.search(r"(\d+[\d.,]*\s*(?:triệu|tr\b|củ\b|k(?!\s*(?:người|lượt|thành|member|follow|sub|bạn))\b|đ\b|vnd|vnđ|m(?![a-z])))", text_content, re.IGNORECASE)
                             price_str = price_match.group(1) if price_match else "Thương lượng"
 
-                            # Bóc tách thời gian đăng bài
+                            # Bóc tách thời gian đăng bài chính xác
                             post_time_text = ""
-                            time_link = post.query_selector("span[id] a[role='link'], a[href*='/posts/'] span, a[href*='permalink'] span, abbr")
-                            if time_link:
-                                aria_t = time_link.get_attribute("aria-label") or time_link.inner_text().strip()
-                                if aria_t and any(w in aria_t.lower() for w in ["phút", "giờ", "ngày", "vừa xong", "hôm qua", "tháng"]):
-                                    post_time_text = aria_t
+                            extracted_pub_at = None
 
-                            if not post_time_text:
+                            time_candidates = post.query_selector_all("a[role='link'], a[href*='/posts/'], a[href*='permalink'], a[href*='set=pcb'], a[href*='set=gm'], a[href*='story_fbid'], abbr, time")
+                            for tc in time_candidates:
+                                aria_val = tc.get_attribute("aria-label") or tc.get_attribute("title") or ""
+                                txt_val = tc.inner_text().strip()
+                                parsed_dt, parsed_str = parse_facebook_time(raw_text=txt_val, aria_label=aria_val)
+                                if parsed_dt:
+                                    extracted_pub_at = parsed_dt
+                                    post_time_text = parsed_str or aria_val or txt_val
+                                    break
+                                elif parsed_str and not post_time_text:
+                                    post_time_text = parsed_str
+
+                            if not extracted_pub_at:
                                 for l in lines:
                                     l_s = l.strip()
-                                    if re.search(r"^(?:\d+\s*(?:phút|giờ|ngày|tuần|tháng)(?:\s*trước)?|vừa xong|hôm qua\s*lúc\s*\d+:\d+)$", l_s.lower()):
-                                        post_time_text = l_s
+                                    parsed_dt, parsed_str = parse_facebook_time(raw_text=l_s)
+                                    if parsed_dt:
+                                        extracted_pub_at = parsed_dt
+                                        post_time_text = parsed_str or l_s
                                         break
-                                    m_rel = re.search(r"\b(\d+\s*(?:phút|giờ|ngày|tuần)\s*trước|vừa xong)\b", l_s.lower())
-                                    if m_rel:
-                                        post_time_text = m_rel.group(1)
-                                        break
+                                    elif parsed_str and any(kw in l_s.lower() for kw in ["trước", "vừa xong", "hôm qua", "tháng"]):
+                                        if not post_time_text:
+                                            post_time_text = l_s
 
                             # Bóc tách ảnh sản phẩm
                             img_el = post.query_selector("img[src*='fbcdn']")
@@ -405,6 +415,7 @@ class FacebookGroupCollector(BaseCollector):
                                 "group_url": group_url,
                                 "text": text_content,
                                 "price": price_str,
+                                "published_at": extracted_pub_at,
                                 "post_time_text": post_time_text,
                                 "url": post_url,
                                 "image_url": img_url,
@@ -472,31 +483,25 @@ class FacebookGroupCollector(BaseCollector):
 
                 # Bóc tách thời gian đăng bài
                 post_time_str = post.get("post_time_text", "")
-                if not post_time_str:
+                published_at = post.get("published_at")
+
+                if not post_time_str or not published_at:
                     for l in text_no_hidden.split("\n"):
                         l_clean = l.strip()
-                        if re.search(r"^(?:\d+\s*(?:phút|giờ|ngày|tuần|tháng)(?:\s*trước)?|vừa xong|hôm qua\s*lúc\s*\d+:\d+)$", l_clean.lower()):
-                            post_time_str = l_clean
-                            break
-                        m_rel = re.search(r"\b(\d+\s*(?:phút|giờ|ngày|tuần)\s*trước|vừa xong)\b", l_clean.lower())
-                        if m_rel:
-                            post_time_str = m_rel.group(1)
+                        if not l_clean or len(l_clean) < 2:
+                            continue
+                        parsed_dt, parsed_str = parse_facebook_time(raw_text=l_clean)
+                        if parsed_dt:
+                            if not post_time_str:
+                                post_time_str = parsed_str
+                            if not published_at:
+                                published_at = parsed_dt
                             break
 
-                published_at = post.get("published_at")
-                if not published_at:
-                    published_at = datetime.utcnow()
-                    if post_time_str:
-                        pt_low = post_time_str.lower()
-                        m_m = re.search(r"(\d+)\s*phút", pt_low)
-                        m_h = re.search(r"(\d+)\s*giờ", pt_low)
-                        m_d = re.search(r"(\d+)\s*ngày", pt_low)
-                        if m_m:
-                            published_at = datetime.utcnow() - timedelta(minutes=int(m_m.group(1)))
-                        elif m_h:
-                            published_at = datetime.utcnow() - timedelta(hours=int(m_h.group(1)))
-                        elif m_d:
-                            published_at = datetime.utcnow() - timedelta(days=int(m_d.group(1)))
+                if not published_at and post_time_str:
+                    parsed_dt, _ = parse_facebook_time(raw_text=post_time_str)
+                    if parsed_dt:
+                        published_at = parsed_dt
 
                 parsed.append({
                     "source_listing_id": post_id,

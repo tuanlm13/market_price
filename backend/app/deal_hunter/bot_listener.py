@@ -526,6 +526,54 @@ def notify_if_general_facebook_post(raw_listing: Any, group_name: str = "") -> b
     price_text = getattr(raw_listing, "raw_price_text", None)
     comments = getattr(raw_listing, "comments", []) or []
 
+    pub_at = getattr(raw_listing, "published_at", None)
+    first_seen = getattr(raw_listing, "first_seen_at", None)
+    post_time_text = meta.get("post_time_text", "")
+
+    # =========================================================================
+    # RECENCY GUARD: Chỉ alert bài mới trong 48h, bỏ qua bài cũ tìm thấy qua Search
+    # =========================================================================
+    now_utc = datetime.utcnow()
+    is_too_old = False
+    old_reason = ""
+
+    if pub_at and isinstance(pub_at, datetime):
+        age_hours = (now_utc - pub_at).total_seconds() / 3600.0
+        if age_hours > 48:
+            is_too_old = True
+            old_reason = f"published_at={pub_at.isoformat()} ({age_hours:.1f}h trước)"
+    elif post_time_text:
+        pt_low = post_time_text.lower()
+        if any(w in pt_low for w in ["tuần", "tháng", "week", "month"]):
+            is_too_old = True
+            old_reason = f"post_time_text='{post_time_text}'"
+        else:
+            m_days = re.search(r"(\d+)\s*(?:ngày|day)", pt_low)
+            if m_days and int(m_days.group(1)) >= 2:
+                is_too_old = True
+                old_reason = f"post_time_text='{post_time_text}'"
+
+    if is_too_old:
+        logger.info(f"[FB Notifier] Bỏ qua bài đăng cũ (> 48h): id={listing_id}, title='{title[:40]}...', lý do: {old_reason}")
+        try:
+            from database import SessionLocal
+            from app.collectors.models import FactRawListing
+            from sqlalchemy.orm.attributes import flag_modified
+            with SessionLocal() as db:
+                db_item = db.query(FactRawListing).filter(FactRawListing.id == listing_id).first()
+                if db_item:
+                    if not db_item.raw_metadata:
+                        db_item.raw_metadata = {}
+                    db_item.raw_metadata["facebook_alerted"] = True
+                    db_item.raw_metadata["facebook_skipped_old"] = True
+                    flag_modified(db_item, "raw_metadata")
+                    db.commit()
+            if hasattr(raw_listing, "raw_metadata") and isinstance(raw_listing.raw_metadata, dict):
+                raw_listing.raw_metadata["facebook_alerted"] = True
+        except Exception as e_skip:
+            logger.debug(f"[FB Notifier] Lỗi cập nhật cờ skip bài cũ: {e_skip}")
+        return False
+
     item_data = {
         "title": title,
         "description": desc,
@@ -535,9 +583,9 @@ def notify_if_general_facebook_post(raw_listing: Any, group_name: str = "") -> b
         "comment_count": len(comments),
         "url": url,
         "post_id": post_id,
-        "published_at": getattr(raw_listing, "published_at", None),
-        "first_seen_at": getattr(raw_listing, "first_seen_at", None),
-        "post_time_text": meta.get("post_time_text", "")
+        "published_at": pub_at,
+        "first_seen_at": first_seen,
+        "post_time_text": post_time_text
     }
 
     sent = general_fb_notifier.send_facebook_alert(item_data)
