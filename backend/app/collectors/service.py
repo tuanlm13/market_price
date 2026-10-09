@@ -69,8 +69,8 @@ def schedule_market_collectors():
     intervals = {
         "GOOFISH": int(os.getenv("COLLECTOR_INTERVAL_GOOFISH", "10")),
         "CHOTOT": int(os.getenv("COLLECTOR_INTERVAL_CHOTOT", "30")),
-        "FACEBOOK_MARKETPLACE": int(os.getenv("COLLECTOR_INTERVAL_FB_MARKETPLACE", "5")),
-        "FACEBOOK_GROUPS": int(os.getenv("COLLECTOR_INTERVAL_FB_GROUPS", "5")),
+        "FACEBOOK_MARKETPLACE": 5,
+        "FACEBOOK_GROUPS": 5,
     }
 
     # Từ khóa quét định kỳ (mặc định quét cả ram và pocket 3)
