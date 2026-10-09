@@ -6,6 +6,7 @@ dist/
 .DS_Store
 .claude/
 .pytest_cache/
+.mypy_cache/
 browser_profiles/
 *.log
 *cookie*.json
