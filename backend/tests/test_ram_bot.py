@@ -133,3 +133,45 @@ def test_clean_facebook_text():
     assert "Bảo hành Mai Hoàng 3 năm" in cleaned
     assert "Xem thêm" not in cleaned
     assert "14 giờ" not in cleaned
+
+
+def test_multiple_chat_ids_comma_separated():
+    """Kiểm tra bot hỗ trợ nhiều chat ID ngăn cách bởi dấu phẩy và gửi broadcast tới tất cả."""
+    from app.deal_hunter.telegram_provider import TelegramNotificationProvider
+    
+    # 1. Test RamTelegramNotifier với nhiều chat_id
+    ram_notifier = RamTelegramNotifier(mock_mode=True, default_chat_id="111111, 222222 , 333333")
+    assert ram_notifier.default_chat_ids == ["111111", "222222", "333333"]
+    assert ram_notifier.default_chat_id == "111111"
+
+    item = {
+        "title": "Bán kit RAM DDR5 32GB Corsair",
+        "price": 2500000.0,
+        "price_text": "2.5tr",
+        "url": "https://facebook.com/groups/ram/posts/888",
+        "group_name": "Chợ RAM"
+    }
+    sent = ram_notifier.send_ram_sale_alert(item)
+    assert sent is True
+    # Cả 3 chat_id đều phải nhận được alert
+    sent_cids = [a["chat_id"] for a in ram_notifier.sent_alerts]
+    assert sent_cids == ["111111", "222222", "333333"]
+
+    # 2. Test TelegramNotificationProvider với nhiều chat_id
+    deal_provider = TelegramNotificationProvider(mock_mode=True, default_chat_id="444444, 555555")
+    assert deal_provider.default_chat_ids == ["444444", "555555"]
+    assert deal_provider.default_chat_id == "444444"
+
+    deal_item = {
+        "title": "RTX 4060 giá rẻ",
+        "price": 5000000.0,
+        "market_median": 7000000.0,
+        "expected_profit": 2000000.0,
+        "roi": 0.4,
+        "source": "Chợ Tốt"
+    }
+    deal_sent = deal_provider.send_deal_alert(deal_item)
+    assert deal_sent is True
+    sent_msg_cids = [m["chat_id"] for m in deal_provider.sent_messages]
+    assert sent_msg_cids == ["444444", "555555"]
+

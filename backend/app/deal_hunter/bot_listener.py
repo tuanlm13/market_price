@@ -18,7 +18,9 @@ class TelegramBotListener:
 
     def __init__(self):
         self.bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-        self.authorized_chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+        raw_auth = os.environ.get("TELEGRAM_CHAT_ID", "")
+        self.authorized_chat_ids = [c.strip() for c in re.split(r"[,;\s]+", str(raw_auth)) if c.strip()]
+        self.authorized_chat_id = self.authorized_chat_ids[0] if self.authorized_chat_ids else ""
         self.running = False
         self.thread: Optional[threading.Thread] = None
         self.last_update_id = 0

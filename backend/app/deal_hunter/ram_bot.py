@@ -130,11 +130,14 @@ class RamTelegramNotifier:
         mock_mode: Optional[bool] = None
     ):
         self.bot_token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN_RAM", "")
-        self.default_chat_id = (
+        raw_chat_ids = (
             default_chat_id
             or os.environ.get("TELEGRAM_CHAT_ID_RAM")
             or os.environ.get("TELEGRAM_CHAT_ID", "")
         )
+        # Hỗ trợ danh sách chat ID phân cách bằng dấu phẩy, chấm phẩy hoặc khoảng trắng
+        self.default_chat_ids = [c.strip() for c in re.split(r"[,;\s]+", str(raw_chat_ids)) if c.strip()]
+        self.default_chat_id = self.default_chat_ids[0] if self.default_chat_ids else ""
         env_mock = os.environ.get("MOCK_TELEGRAM", "false").lower() in ("true", "1", "yes")
         if mock_mode is not None:
             self.mock_mode = mock_mode
@@ -181,8 +184,8 @@ class RamTelegramNotifier:
         return msg
 
     def send_ram_sale_alert(self, item: Dict[str, Any], chat_id: Optional[str] = None) -> bool:
-        target_chat = chat_id or self.default_chat_id
-        if not target_chat:
+        target_chats = [chat_id] if chat_id else self.default_chat_ids
+        if not target_chats:
             logger.warning("[RAM Bot] Không có chat_id để gửi alert RAM.")
             return False
 
@@ -194,16 +197,21 @@ class RamTelegramNotifier:
         message_text = self.format_ram_message(item)
 
         if self.mock_mode:
-            logger.info(f"[MOCK RAM BOT] Gửi alert RAM tới chat_id={target_chat}:\n{message_text}")
-            self.sent_alerts.append({"chat_id": target_chat, "text": message_text, "item": item})
+            for t_chat in target_chats:
+                logger.info(f"[MOCK RAM BOT] Gửi alert RAM tới chat_id={t_chat}:\n{message_text}")
+                self.sent_alerts.append({"chat_id": t_chat, "text": message_text, "item": item})
             if url:
                 self._notified_urls.add(url)
             return True
 
-        success = self._send_telegram_text(message_text, target_chat, item_url=url)
-        if success and url:
+        success_any = False
+        for t_chat in target_chats:
+            if self._send_telegram_text(message_text, t_chat, item_url=url):
+                success_any = True
+
+        if success_any and url:
             self._notified_urls.add(url)
-        return success
+        return success_any
 
     def _send_telegram_text(self, text: str, chat_id: str, item_url: str = "") -> bool:
         if not self.bot_token or not chat_id:
@@ -282,7 +290,9 @@ class RamTelegramBotListener:
     """
     def __init__(self):
         self.bot_token = os.environ.get("TELEGRAM_BOT_TOKEN_RAM", "")
-        self.authorized_chat_id = os.environ.get("TELEGRAM_CHAT_ID_RAM", os.environ.get("TELEGRAM_CHAT_ID", ""))
+        raw_auth = os.environ.get("TELEGRAM_CHAT_ID_RAM", os.environ.get("TELEGRAM_CHAT_ID", ""))
+        self.authorized_chat_ids = [c.strip() for c in re.split(r"[,;\s]+", str(raw_auth)) if c.strip()]
+        self.authorized_chat_id = self.authorized_chat_ids[0] if self.authorized_chat_ids else ""
         self.running = False
         self.thread: Optional[threading.Thread] = None
         self.last_update_id = 0

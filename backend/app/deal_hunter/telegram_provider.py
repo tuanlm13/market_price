@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 import urllib.request
 import urllib.parse
@@ -20,7 +21,10 @@ class TelegramNotificationProvider(NotificationProvider):
         mock_mode: Optional[bool] = None
     ):
         self.bot_token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", "")
-        self.default_chat_id = default_chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")
+        raw_chat_id = default_chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")
+        # Hỗ trợ danh sách chat ID phân cách bằng dấu phẩy, chấm phẩy hoặc khoảng trắng
+        self.default_chat_ids = [c.strip() for c in re.split(r"[,;\s]+", str(raw_chat_id)) if c.strip()]
+        self.default_chat_id = self.default_chat_ids[0] if self.default_chat_ids else ""
         
         # Nếu chỉ định mock_mode hoặc env MOCK_TELEGRAM=true hoặc không có token -> mock mode
         env_mock = os.environ.get("MOCK_TELEGRAM", "false").lower() in ("true", "1", "yes")
@@ -33,31 +37,47 @@ class TelegramNotificationProvider(NotificationProvider):
 
     def send(self, subject: str, body: str, recipient: str = "") -> bool:
         """Thực thi abstract method send() từ NotificationProvider."""
-        target_chat_id = recipient or self.default_chat_id
+        target_chats = [recipient] if recipient else self.default_chat_ids
+        if not target_chats:
+            return False
         text = f"*{subject}*\n\n{body}" if subject else body
-        return self._send_telegram_text(text, target_chat_id)
+        success_any = False
+        for cid in target_chats:
+            if self._send_telegram_text(text, cid):
+                success_any = True
+        return success_any
 
     def send_deal_alert(self, deal_data: Dict[str, Any], chat_id: Optional[str] = None) -> bool:
         """
-        Định dạng và gửi thông báo 🚨 DEAL MỚI theo cấu trúc chuẩn.
+        Định dạng và gửi thông báo 🚨 DEAL MỚI theo cấu trúc chuẩn tới tất cả chat_id được cấu hình.
         Hỗ trợ:
         - Gửi kèm ảnh thật của sản phẩm (sendPhoto) nếu có image_url.
         - Đính kèm nút bấm (Inline Keyboard) để mở thẳng bài đăng gốc.
         """
-        target_chat = chat_id or self.default_chat_id
+        target_chats = [chat_id] if chat_id else self.default_chat_ids
+        if not target_chats:
+            logger.warning("Không có chat_id nào được cấu hình để gửi deal alert.")
+            return False
+
         message_text = self.format_deal_message(deal_data)
         image_url = deal_data.get("image_url")
         item_url = deal_data.get("url", "#")
 
-        # Thử gửi kèm ảnh thật nếu có
-        if image_url and str(image_url).startswith("http") and not self.mock_mode:
-            photo_sent = self._send_telegram_photo(image_url, message_text, target_chat, item_url)
-            if photo_sent:
-                return True
-            logger.info("sendPhoto không thành công, tự động chuyển về sendMessage thông thường...")
+        success_any = False
+        for target_chat in target_chats:
+            # Thử gửi kèm ảnh thật nếu có
+            if image_url and str(image_url).startswith("http") and not self.mock_mode:
+                photo_sent = self._send_telegram_photo(image_url, message_text, target_chat, item_url)
+                if photo_sent:
+                    success_any = True
+                    continue
+                logger.info(f"sendPhoto tới {target_chat} không thành công, tự động chuyển về sendMessage thông thường...")
 
-        # Fallback gửi text kèm inline button
-        return self._send_telegram_text(message_text, target_chat, item_url)
+            # Fallback gửi text kèm inline button
+            if self._send_telegram_text(message_text, target_chat, item_url):
+                success_any = True
+
+        return success_any
 
     def _send_telegram_photo(self, photo_url: str, caption: str, chat_id: str, item_url: str) -> bool:
         if not self.bot_token or not chat_id:
