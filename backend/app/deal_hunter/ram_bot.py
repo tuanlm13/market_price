@@ -330,6 +330,10 @@ class RamTelegramNotifier:
                 return bool(result.get("ok"))
         except urllib.error.HTTPError as e:
             err_body = e.read().decode("utf-8", errors="ignore")
+            if "chat not found" in err_body.lower():
+                logger.warning(f"[RAM Bot] Chat ID '{chat_id}' không tồn tại hoặc chưa bấm /start với Bot. Telegram yêu cầu người dùng phải bấm Start bot trước khi nhận tin nhắn.")
+                return False
+
             logger.error(f"[RAM Bot] Lỗi gửi tin nhắn Telegram HTTP {e.code}: {err_body}")
             # Fallback gửi plain-text nếu Telegram không thể parse HTML entities
             if e.code == 400:
