@@ -2,6 +2,7 @@ import os
 import re
 import time
 import json
+import html
 import logging
 import threading
 import urllib.request
@@ -241,17 +242,26 @@ class RamTelegramNotifier:
         raw_time_str = item.get("post_time_text") or item.get("time_text") or ""
         time_display = format_time_ago(posted_at, raw_time_str)
 
+        # Escape toàn bộ ký tự HTML đặc biệt (&, <, >) để tránh lỗi 400 Bad Request từ Telegram HTML parser
+        safe_title = html.escape(str(title))
+        safe_price = html.escape(str(price))
+        safe_group_name = html.escape(str(group_name))
+        safe_seller_name = html.escape(str(seller_name))
+        safe_time_display = html.escape(str(time_display))
+        safe_desc = html.escape(str(desc_snippet))
+        safe_url = html.escape(str(url))
+
         msg = (
             "⚡ <b>PHÁT HIỆN BÀI ĐĂNG BÁN RAM MỚI</b> ⚡\n\n"
-            f"📦 <b>Sản phẩm:</b> {title}\n"
-            f"🏷️ <b>Giá rao:</b> <code>{price}</code>\n"
-            f"👥 <b>Hội nhóm:</b> <b>{group_name}</b>\n"
-            f"👤 <b>Người bán:</b> {seller_name}\n"
-            f"⏰ <b>Thời gian:</b> {time_display}\n"
+            f"📦 <b>Sản phẩm:</b> {safe_title}\n"
+            f"🏷️ <b>Giá rao:</b> <code>{safe_price}</code>\n"
+            f"👥 <b>Hội nhóm:</b> <b>{safe_group_name}</b>\n"
+            f"👤 <b>Người bán:</b> {safe_seller_name}\n"
+            f"⏰ <b>Thời gian:</b> {safe_time_display}\n"
             f"💬 <b>Bình luận:</b> {cmt_count}\n\n"
             f"📝 <b>Nội dung trích đoạn:</b>\n"
-            f"<i>{desc_snippet}</i>\n\n"
-            f"🔗 <a href=\"{url}\">👉 BẤM VÀO ĐÂY ĐỂ MỞ BÀI ĐĂNG FACEBOOK</a>"
+            f"<i>{safe_desc}</i>\n\n"
+            f"🔗 <a href=\"{safe_url}\">👉 BẤM VÀO ĐÂY ĐỂ MỞ BÀI ĐĂNG FACEBOOK</a>"
         )
         return msg
 
@@ -318,6 +328,27 @@ class RamTelegramNotifier:
             with urllib.request.urlopen(req, timeout=12) as resp:
                 result = json.loads(resp.read().decode("utf-8"))
                 return bool(result.get("ok"))
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", errors="ignore")
+            logger.error(f"[RAM Bot] Lỗi gửi tin nhắn Telegram HTTP {e.code}: {err_body}")
+            # Fallback gửi plain-text nếu Telegram không thể parse HTML entities
+            if e.code == 400:
+                try:
+                    plain_text = re.sub(r"<[^>]+>", "", text)
+                    fallback_payload = dict(payload)
+                    fallback_payload["text"] = plain_text
+                    fallback_payload.pop("parse_mode", None)
+                    fallback_req = urllib.request.Request(
+                        url,
+                        data=json.dumps(fallback_payload).encode("utf-8"),
+                        headers={"Content-Type": "application/json"}
+                    )
+                    with urllib.request.urlopen(fallback_req, timeout=12) as fb_resp:
+                        res = json.loads(fb_resp.read().decode("utf-8"))
+                        return bool(res.get("ok"))
+                except Exception as fb_err:
+                    logger.error(f"[RAM Bot] Fallback gửi plain text thất bại: {fb_err}")
+            return False
         except Exception as e:
             logger.error(f"[RAM Bot] Lỗi gửi tin nhắn Telegram: {e}")
             return False
