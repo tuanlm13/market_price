@@ -218,8 +218,8 @@ class FacebookGroupCollector(BaseCollector):
                 # 1. Tải danh sách nhóm đã tham gia
                 joined_groups = self.load_joined_groups(page=page)
                 
-                # 2. Lọc các nhóm liên quan đến từ khóa
-                target_groups = self.get_relevant_joined_groups(query, joined_groups, max_groups=3)
+                # 2. Lọc các nhóm liên quan đến từ khóa (tăng lên 5 nhóm để đa dạng nguồn tin)
+                target_groups = self.get_relevant_joined_groups(query, joined_groups, max_groups=5)
                 if not target_groups:
                     logger.warning(f"[{self.source_code}] Không tìm thấy nhóm đã tham gia phù hợp cho '{query}'")
                     # Fallback tìm kiếm chung trên Search Posts toàn Facebook
@@ -243,7 +243,7 @@ class FacebookGroupCollector(BaseCollector):
                     logger.info(f"[{self.source_code}] Truy cập nhóm: '{group_name}' tại {search_url}")
                     try:
                         page.goto(search_url, timeout=35000, wait_until="domcontentloaded")
-                        page.wait_for_timeout(4000)
+                        page.wait_for_timeout(3500)
 
                         # Check Auth / Checkpoint
                         curr = page.url.lower()
@@ -251,13 +251,18 @@ class FacebookGroupCollector(BaseCollector):
                             logger.error(f"[{self.source_code}] Cần đăng nhập lại Facebook hoặc gặp Checkpoint")
                             break
 
+                        # Cuộn trang 2 lần để kích hoạt tải các bài đăng mới hơn
+                        for _ in range(2):
+                            page.mouse.wheel(0, 1600)
+                            page.wait_for_timeout(1200)
+
                         # Click tất cả nút "Xem thêm" để mở trọn vẹn mô tả bài đăng
                         page.evaluate("""() => {
                             const seeMores = Array.from(document.querySelectorAll('div[role="button"]'))
                                 .filter(el => el.innerText && el.innerText.includes('Xem thêm'));
                             seeMores.forEach(el => el.click());
                         }""")
-                        page.wait_for_timeout(1500)
+                        page.wait_for_timeout(1000)
 
                         feed = page.query_selector("div[role='feed']")
                         post_elements = feed.query_selector_all(":scope > div") if feed else page.query_selector_all("div[role='article']")
@@ -265,10 +270,51 @@ class FacebookGroupCollector(BaseCollector):
                         logger.info(f"[{self.source_code}] Tìm thấy {len(post_elements)} bài đăng trong nhóm '{group_name}'")
 
                         # Bóc tách từng bài đăng
-                        for idx, post in enumerate(post_elements[:15]):
+                        for idx, post in enumerate(post_elements[:20]):
                             text_content = post.inner_text().strip()
                             lines = [l.strip() for l in text_content.split("\n") if l.strip() and l.strip() != "Facebook"]
                             if len(lines) < 2:
+                                continue
+
+                            # 1. BỎ QUA nếu là Thẻ thành viên / Profile Card / Gợi ý kết bạn
+                            profile_signals = [
+                                "thêm bạn bè", "người sáng tạo nội dung", "người theo dõi",
+                                "theo dõi trang", "xem trang cá nhân", "gửi lời mời", "nhắn tin riêng"
+                            ]
+                            if any(sig in text_content.lower() for sig in profile_signals):
+                                continue
+
+                            # Bóc tách permalink và post_id chính xác (BẮT BUỘC có permalink tới bài đăng)
+                            post_id = ""
+                            post_url = ""
+                            all_links = post.query_selector_all("a")
+                            for a in all_links:
+                                href = a.get_attribute("href") or ""
+                                m = re.search(r"set=(?:gm|pcb)\.(\d+)", href)
+                                if m:
+                                    post_id = m.group(1)
+                                    gid_match = re.search(r"/groups/([^/?]+)", group_url)
+                                    gid = gid_match.group(1) if gid_match else ""
+                                    post_url = f"https://www.facebook.com/groups/{gid}/posts/{post_id}/" if gid else f"https://www.facebook.com/permalink.php?story_fbid={post_id}"
+                                    break
+                                elif "/posts/" in href or "/permalink/" in href:
+                                    clean_h = href.split("?")[0]
+                                    post_url = f"https://www.facebook.com{clean_h}" if clean_h.startswith("/") else clean_h
+                                    id_m = re.search(r"/posts/(\d+)", post_url)
+                                    if id_m:
+                                        post_id = id_m.group(1)
+                                    break
+                                elif "story_fbid=" in href or "fbid=" in href:
+                                    id_m = re.search(r"(?:story_fbid|fbid)=(\d+)", href)
+                                    if id_m:
+                                        post_id = id_m.group(1)
+                                        gid_match = re.search(r"/groups/([^/?]+)", group_url)
+                                        gid = gid_match.group(1) if gid_match else ""
+                                        post_url = f"https://www.facebook.com/groups/{gid}/posts/{post_id}/" if gid else f"https://www.facebook.com/permalink.php?story_fbid={post_id}"
+                                        break
+
+                            # BẮT BUỘC: Nếu không lấy được permalink bài viết (ví dụ banner, menu...) -> BỎ QUA
+                            if not post_url or not post_id or post_url == search_url:
                                 continue
 
                             # Bóc tách người đăng
@@ -301,29 +347,6 @@ class FacebookGroupCollector(BaseCollector):
                             # Bóc tách ảnh sản phẩm
                             img_el = post.query_selector("img[src*='fbcdn']")
                             img_url = img_el.get_attribute("src") if img_el else ""
-
-                            # Bóc tách permalink và post_id chính xác
-                            post_id = f"fb_{abs(hash(text_content[:60]))}"
-                            post_url = search_url
-                            all_links = post.query_selector_all("a")
-                            for a in all_links:
-                                href = a.get_attribute("href") or ""
-                                m = re.search(r"set=(?:gm|pcb)\.(\d+)", href)
-                                if m:
-                                    fbid = m.group(1)
-                                    # Lấy group ID từ group_url
-                                    gid_match = re.search(r"/groups/([^/?]+)", group_url)
-                                    gid = gid_match.group(1) if gid_match else ""
-                                    post_id = fbid
-                                    post_url = f"https://www.facebook.com/groups/{gid}/posts/{fbid}/" if gid else f"https://www.facebook.com/permalink.php?story_fbid={fbid}"
-                                    break
-                                elif "/posts/" in href or "/permalink/" in href:
-                                    clean_h = href.split("?")[0]
-                                    post_url = f"https://www.facebook.com{clean_h}" if clean_h.startswith("/") else clean_h
-                                    id_m = re.search(r"/posts/(\d+)", post_url)
-                                    if id_m:
-                                        post_id = id_m.group(1)
-                                    break
 
                             # Bóc tách bình luận ngay trên bài viết (nếu hiển thị)
                             extracted_comments = []

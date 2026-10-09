@@ -213,11 +213,13 @@ class BaseCollector(ABC):
                 target_listing_id = new_listing.id
                 items_new += 1
 
-                # Tự động gửi thông báo đến Bot RAM Telegram nếu là bài đăng bán RAM từ Group FB
-                if source.code == "FACEBOOK_GROUPS":
+                # Tự động gửi thông báo đến Bot RAM Telegram nếu là bài đăng bán RAM từ Group FB hoặc Marketplace
+                if source.code in ("FACEBOOK_GROUPS", "FACEBOOK_MARKETPLACE"):
                     try:
                         from app.deal_hunter.ram_bot import notify_if_ram_post
                         grp_name = (new_listing.raw_metadata or {}).get("group_name", "")
+                        if not grp_name and source.code == "FACEBOOK_MARKETPLACE":
+                            grp_name = "Facebook Marketplace"
                         notify_if_ram_post(new_listing, group_name=grp_name)
                     except Exception as ex:
                         logger.debug(f"Lỗi gửi thông báo RAM bot: {ex}")

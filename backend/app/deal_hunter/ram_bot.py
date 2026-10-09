@@ -112,6 +112,11 @@ def is_ram_post(title: str, description: str = "") -> Tuple[bool, str]:
         if re.search(pat, title_lower):
             return False, "DEFECTIVE_OR_PARTS_RAM"
 
+    # 1.1 Chặn profile card / trang cá nhân được gợi ý / follower
+    profile_indicators = r"\b(thêm bạn bè|người sáng tạo nội dung|người theo dõi|theo dõi trang|gửi lời mời kết bạn|tin nhắn riêng|xem trang cá nhân|k người theo dõi)\b"
+    if re.search(profile_indicators, full_text):
+        return False, "PROFILE_OR_USER_CARD"
+
     # 2. Chặn tin rác / phụ kiện khác
     if is_junk_listing(title_lower):
         return False, "JUNK_LISTING"
@@ -189,6 +194,24 @@ class RamTelegramNotifier:
 
         self.sent_alerts = []
         self._notified_urls: Set[str] = set()
+        self._load_alerted_cache_from_db()
+
+    def _load_alerted_cache_from_db(self):
+        """Khôi phục danh sách URL bài đăng đã alert từ DB khi bot khởi động."""
+        try:
+            from database import SessionLocal
+            from app.collectors.models import FactRawListing
+            with SessionLocal() as db:
+                alerted = db.query(FactRawListing.url, FactRawListing.raw_metadata).filter(
+                    FactRawListing.raw_metadata.isnot(None)
+                ).all()
+                for u, m in alerted:
+                    if isinstance(m, dict) and m.get("ram_alerted"):
+                        if u:
+                            self._notified_urls.add(u)
+                            self._notified_urls.add(u.split("?")[0].rstrip("/"))
+        except Exception as e:
+            logger.debug(f"[RAM Bot] Không thể load alerted cache từ DB: {e}")
 
     def format_ram_message(self, item: Dict[str, Any]) -> str:
         title = item.get("title", "Tin bán RAM")
@@ -239,7 +262,8 @@ class RamTelegramNotifier:
             return False
 
         url = item.get("url", "")
-        if url and url in self._notified_urls:
+        clean_url = url.split("?")[0].rstrip("/") if url else ""
+        if (url and url in self._notified_urls) or (clean_url and clean_url in self._notified_urls):
             logger.info(f"[RAM Bot] Bài đăng đã được alert trước đó: {url}")
             return False
 
@@ -251,6 +275,8 @@ class RamTelegramNotifier:
                 self.sent_alerts.append({"chat_id": t_chat, "text": message_text, "item": item})
             if url:
                 self._notified_urls.add(url)
+            if clean_url:
+                self._notified_urls.add(clean_url)
             return True
 
         success_any = False
@@ -258,8 +284,11 @@ class RamTelegramNotifier:
             if self._send_telegram_text(message_text, t_chat, item_url=url):
                 success_any = True
 
-        if success_any and url:
-            self._notified_urls.add(url)
+        if success_any:
+            if url:
+                self._notified_urls.add(url)
+            if clean_url:
+                self._notified_urls.add(clean_url)
         return success_any
 
     def _send_telegram_text(self, text: str, chat_id: str, item_url: str = "") -> bool:
@@ -301,7 +330,18 @@ def notify_if_ram_post(raw_listing: Any, group_name: str = "") -> bool:
     """
     Hook gọi sau khi thu thập một bài đăng từ Facebook Group.
     Tự động kiểm tra và báo về Telegram Bot RAM nếu thỏa mãn.
+    Đảm bảo Persistent Deduplication - không bao giờ gửi lại bài cũ.
     """
+    # 1. Kiểm tra cờ đã alert trong DB
+    meta = getattr(raw_listing, "raw_metadata", {}) or {}
+    if meta.get("ram_alerted"):
+        logger.info(f"[RAM Bot] Listing id={getattr(raw_listing, 'id', None)} đã được alert trước đó trong DB.")
+        return False
+
+    url = getattr(raw_listing, "url", "#")
+    if not url or url == "#" or "/search" in url:
+        return False
+
     title = getattr(raw_listing, "raw_title", "") or ""
     desc = getattr(raw_listing, "raw_description", "") or ""
 
@@ -309,11 +349,27 @@ def notify_if_ram_post(raw_listing: Any, group_name: str = "") -> bool:
     if not is_valid_ram:
         return False
 
-    meta = getattr(raw_listing, "raw_metadata", {}) or {}
+    # 2. Kiểm tra trùng lặp trong DB theo clean_url
+    clean_url = url.split("?")[0].rstrip("/")
+    listing_id = getattr(raw_listing, "id", None)
+    try:
+        from database import SessionLocal
+        from app.collectors.models import FactRawListing
+        with SessionLocal() as db:
+            if clean_url:
+                existing_alerted = db.query(FactRawListing).filter(
+                    FactRawListing.url.like(f"{clean_url}%"),
+                    FactRawListing.id != listing_id
+                ).first()
+                if existing_alerted and (existing_alerted.raw_metadata or {}).get("ram_alerted"):
+                    logger.info(f"[RAM Bot] URL {clean_url} đã được alert trong listing {existing_alerted.id}.")
+                    return False
+    except Exception as e_chk:
+        logger.debug(f"[RAM Bot] Lỗi kiểm tra trùng lặp DB: {e_chk}")
+
     grp = group_name or meta.get("group_name", "Hội nhóm Facebook")
     seller = getattr(raw_listing, "seller_name_raw", None) or "Người bán trên nhóm"
     price_text = getattr(raw_listing, "raw_price_text", None)
-    url = getattr(raw_listing, "url", "#")
     comments = getattr(raw_listing, "comments", []) or []
 
     pub_at = getattr(raw_listing, "published_at", None)
@@ -333,7 +389,30 @@ def notify_if_ram_post(raw_listing: Any, group_name: str = "") -> bool:
         "post_time_text": post_time_text
     }
 
-    return ram_notifier.send_ram_sale_alert(item_data)
+    sent = ram_notifier.send_ram_sale_alert(item_data)
+    if sent:
+        # Cập nhật cờ ram_alerted vào Database ngay lập tức
+        try:
+            from database import SessionLocal
+            from app.collectors.models import FactRawListing
+            from sqlalchemy.orm.attributes import flag_modified
+            with SessionLocal() as db:
+                db_item = db.query(FactRawListing).filter(FactRawListing.id == listing_id).first()
+                if db_item:
+                    if not db_item.raw_metadata:
+                        db_item.raw_metadata = {}
+                    db_item.raw_metadata["ram_alerted"] = True
+                    db_item.raw_metadata["ram_alerted_at"] = datetime.utcnow().isoformat()
+                    flag_modified(db_item, "raw_metadata")
+                    db.commit()
+            if hasattr(raw_listing, "raw_metadata"):
+                if not raw_listing.raw_metadata:
+                    raw_listing.raw_metadata = {}
+                raw_listing.raw_metadata["ram_alerted"] = True
+        except Exception as e_save:
+            logger.error(f"[RAM Bot] Lỗi lưu cờ ram_alerted vào DB: {e_save}")
+
+    return sent
 
 
 # ============================================================================

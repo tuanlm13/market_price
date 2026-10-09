@@ -36,6 +36,9 @@ def test_is_ram_post_blocked_cases():
         ("Ram Xác - Lỗi Thanh lý nhanh gọn - Hà Nội . Qua 244 Lê Thanh Nghị mua trực tiếp .", "Bán xác linh kiện", "DEFECTIVE_OR_PARTS_RAM"),
         ("Bán xác 10 thanh ram ddr3 cho thợ", "Thanh lý dọn kho", "DEFECTIVE_OR_PARTS_RAM"),
         ("10 thanh ram ddr4 bị lỗi không nhận", "", "DEFECTIVE_OR_PARTS_RAM"),
+        # Thẻ trang cá nhân / Profile Card thành viên nhóm (như Trang Nguyễn, Trần Thanh)
+        ("Trang Nguyễn (PP Ssd Ram Kingbank)", "Người sáng tạo nội dung số · 2,2K người theo dõi · Thêm bạn bè", "PROFILE_OR_USER_CARD"),
+        ("Trần Thanh (thanh ram)", "1.5K người theo dõi · Nhắn tin · Thêm bạn bè", "PROFILE_OR_USER_CARD"),
         # Phụ kiện / tin rác
         ("Quạt tản nhiệt RAM RGB Jonsbo", "Phụ kiện làm mát", "INTENT_ACCESSORY"),
         # Sản phẩm khác
