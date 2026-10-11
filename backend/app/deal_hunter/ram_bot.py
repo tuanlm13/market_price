@@ -821,10 +821,10 @@ class RamTelegramBotListener:
                         reverse=True
                     )
 
-                # Chọn kết quả đại diện từ mỗi nguồn (tối đa 2-3 tin/nguồn)
-                fb_group_top = grouped_results["FACEBOOK_GROUPS"][:2]
-                fb_mp_top = grouped_results["FACEBOOK_MARKETPLACE"][:2]
-                chotot_top = grouped_results["CHOTOT"][:2]
+                # Chọn kết quả đại diện từ mỗi nguồn (3 tin/nguồn)
+                fb_group_top = grouped_results["FACEBOOK_GROUPS"][:3]
+                fb_mp_top = grouped_results["FACEBOOK_MARKETPLACE"][:3]
+                chotot_top = grouped_results["CHOTOT"][:3]
 
                 total_matched = len(fb_group_top) + len(fb_mp_top) + len(chotot_top)
                 if total_matched == 0:

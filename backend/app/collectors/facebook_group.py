@@ -43,53 +43,92 @@ class FacebookGroupCollector(BaseCollector):
                 return p
         return candidates[0]
 
-    def load_joined_groups(self, page=None) -> List[Dict[str, str]]:
+    CACHE_TTL_HOURS = int(os.getenv("FB_GROUPS_CACHE_TTL_HOURS", "12"))
+
+    def load_joined_groups(self, page=None, force_refresh: bool = False) -> List[Dict[str, str]]:
         """
         Tải danh sách các nhóm Facebook tài khoản đã tham gia.
-        Ưu tiên đọc từ cache; nếu chưa có thì quét trực tiếp từ https://www.facebook.com/groups/joins/
+        - Tự động kiểm tra TTL (mặc định 12 giờ).
+        - Nếu cache còn hạn và không yêu cầu force_refresh: đọc nhanh từ cache.
+        - Nếu cache quá hạn hoặc force_refresh=True (và có page): tự động đồng bộ lại từ https://www.facebook.com/groups/joins/
         """
         cache_file = self._get_cache_path()
+        cached_groups = []
+        cache_is_fresh = False
+
         if os.path.exists(cache_file):
             try:
+                # Kiểm tra thời gian sửa đổi gần nhất của file cache
+                mtime = datetime.fromtimestamp(os.path.getmtime(cache_file))
+                cache_age = datetime.now() - mtime
+                if cache_age < timedelta(hours=self.CACHE_TTL_HOURS):
+                    cache_is_fresh = True
+                
                 with open(cache_file, "r", encoding="utf-8") as f:
-                    groups = json.load(f)
-                    if isinstance(groups, list) and len(groups) > 0:
-                        logger.info(f"[{self.source_code}] Đã nạp {len(groups)} nhóm đã tham gia từ cache {cache_file}")
-                        return groups
+                    data = json.load(f)
+                    if isinstance(data, list) and len(data) > 0:
+                        cached_groups = data
             except Exception as e:
                 logger.warning(f"[{self.source_code}] Lỗi đọc cache nhóm: {e}")
 
-        # Nếu có page Playwright đang mở thì quét tự động
+        # Nếu cache còn hạn và không bắt buộc làm mới, trả về ngay
+        if cached_groups and cache_is_fresh and not force_refresh:
+            logger.info(f"[{self.source_code}] Đã nạp {len(cached_groups)} nhóm từ cache (còn hạn, TTL={self.CACHE_TTL_HOURS}h)")
+            return cached_groups
+
+        # Nếu có page Playwright thì tự động quét đồng bộ danh sách nhóm mới
         if page:
-            logger.info(f"[{self.source_code}] Đang quét danh sách nhóm đã tham gia từ /groups/joins/...")
+            logger.info(f"[{self.source_code}] Đang tự động quét/làm mới danh sách nhóm từ /groups/joins/...")
             try:
                 page.goto("https://www.facebook.com/groups/joins/", timeout=40000, wait_until="domcontentloaded")
-                page.wait_for_timeout(4000)
-                for _ in range(4):
-                    page.mouse.wheel(0, 1500)
-                    page.wait_for_timeout(1000)
+                page.wait_for_timeout(3500)
 
-                links = page.query_selector_all("a[href*='/groups/']")
+                curr = page.url.lower()
+                if "login" in curr or "checkpoint" in curr:
+                    logger.warning(f"[{self.source_code}] Không thể quét /groups/joins/ do chưa đăng nhập hoặc gặp checkpoint")
+                    return cached_groups
+
+                # Cuộn trang thích ứng (adaptive scrolling) cho đến khi lấy hết tất cả nhóm
                 seen = {}
-                for l in links:
-                    href = l.get_attribute("href") or ""
-                    text = l.inner_text().strip()
-                    if text and len(text) > 3 and not any(x in text.lower() for x in ["xem nhóm", "tạo nhóm", "khám phá", "bảng feed"]):
-                        if "/groups/" in href and not any(x in href for x in ["/feed", "/discover", "/create", "/joins", "/category"]):
-                            clean_name = text.split("\n")[0].strip()
-                            clean_href = href.split("?")[0].strip()
-                            if clean_name not in seen and len(clean_name) > 3:
-                                seen[clean_name] = clean_href
+                last_count = 0
+                stable_iterations = 0
+                for _ in range(30):
+                    links = page.query_selector_all("a[href*='/groups/']")
+                    for l in links:
+                        href = l.get_attribute("href") or ""
+                        text = l.inner_text().strip()
+                        if text and len(text) > 3 and not any(x in text.lower() for x in ["xem nhóm", "tạo nhóm", "khám phá", "bảng feed"]):
+                            if "/groups/" in href and not any(x in href for x in ["/feed", "/discover", "/create", "/joins", "/category"]):
+                                clean_name = text.split("\n")[0].strip()
+                                clean_href = href.split("?")[0].strip()
+                                if clean_name not in seen and len(clean_name) > 3:
+                                    seen[clean_name] = clean_href
+
+                    if len(seen) == last_count and len(seen) > 0:
+                        stable_iterations += 1
+                        if stable_iterations >= 3:
+                            break
+                    else:
+                        stable_iterations = 0
+                    last_count = len(seen)
+
+                    page.mouse.wheel(0, 1800)
+                    page.wait_for_timeout(1200)
 
                 group_list = [{"name": k, "url": v} for k, v in seen.items()]
                 if group_list:
                     os.makedirs(os.path.dirname(cache_file), exist_ok=True)
                     with open(cache_file, "w", encoding="utf-8") as f:
                         json.dump(group_list, f, ensure_ascii=False, indent=2)
-                    logger.info(f"[{self.source_code}] Đã lưu {len(group_list)} nhóm đã tham gia vào cache")
+                    logger.info(f"[{self.source_code}] Đã tự động cập nhật {len(group_list)} nhóm đã tham gia vào cache")
                     return group_list
             except Exception as e:
                 logger.warning(f"[{self.source_code}] Quét nhóm trực tiếp thất bại: {e}")
+
+        # Fallback: Trả về cache cũ nếu quét trực tiếp không thành công
+        if cached_groups:
+            logger.info(f"[{self.source_code}] Sử dụng cache hiện có ({len(cached_groups)} nhóm)")
+            return cached_groups
 
         return []
 
@@ -208,10 +247,165 @@ class FacebookGroupCollector(BaseCollector):
 
         return comments
 
+    def _extract_posts_from_page(self, page, default_group_name: str = "", default_group_url: str = "") -> List[Dict[str, Any]]:
+        """
+        Bóc tách toàn bộ bài đăng từ trang Facebook hiện tại (hỗ trợ cả Search Posts, Groups Feed và Group Internal Search).
+        Tự động nhận diện group_name, group_url, post_id, author, giá, thời gian đăng, ảnh và bình luận.
+        """
+        posts_data = []
+        feed = page.query_selector("div[role='feed']")
+        post_elements = feed.query_selector_all(":scope > div") if feed else page.query_selector_all("div[role='article']")
+        logger.info(f"[{self.source_code}] Tìm thấy {len(post_elements)} phần tử bài đăng trên trang")
+
+        for idx, post in enumerate(post_elements[:25]):
+            text_content = post.inner_text().strip()
+            lines = [l.strip() for l in text_content.split("\n") if l.strip() and l.strip() != "Facebook"]
+            if len(lines) < 2:
+                continue
+
+            # Bỏ qua thẻ thành viên / profile card / gợi ý kết bạn
+            profile_signals = [
+                "thêm bạn bè", "người sáng tạo nội dung", "người theo dõi",
+                "theo dõi trang", "xem trang cá nhân", "gửi lời mời", "nhắn tin riêng"
+            ]
+            if any(sig in text_content.lower() for sig in profile_signals):
+                continue
+
+            # Trích xuất nhóm từ link bên trong bài viết
+            extracted_group_name = default_group_name
+            extracted_group_url = default_group_url
+            for a in post.query_selector_all("a[href*='/groups/']"):
+                href = a.get_attribute("href") or ""
+                if "/user/" in href:
+                    continue
+                gid_m = re.search(r"/groups/([^/?]+)", href)
+                if gid_m:
+                    extracted_group_url = f"https://www.facebook.com/groups/{gid_m.group(1)}/"
+                    txt = a.inner_text().strip().split("\n")[0]
+                    if txt and len(txt) > 2 and not any(x in txt.lower() for x in ["xem thêm", "thích", "bình luận", "chia sẻ", "nhóm"]):
+                        extracted_group_name = txt
+                    break
+
+            if not extracted_group_name and lines:
+                extracted_group_name = lines[0]
+
+            # Bóc tách permalink và post_id chính xác
+            post_id = ""
+            post_url = ""
+            all_links = post.query_selector_all("a")
+            for a in all_links:
+                href = a.get_attribute("href") or ""
+                m = re.search(r"set=(?:gm|pcb)\.(\d+)", href)
+                if m:
+                    post_id = m.group(1)
+                    gid = re.search(r"/groups/([^/?]+)", extracted_group_url)
+                    gid_val = gid.group(1) if gid else ""
+                    post_url = f"https://www.facebook.com/groups/{gid_val}/posts/{post_id}/" if gid_val else f"https://www.facebook.com/permalink.php?story_fbid={post_id}"
+                    break
+                elif "/posts/" in href or "/permalink/" in href:
+                    clean_h = href.split("?")[0]
+                    post_url = f"https://www.facebook.com{clean_h}" if clean_h.startswith("/") else clean_h
+                    id_m = re.search(r"/posts/(\d+)", post_url)
+                    if id_m:
+                        post_id = id_m.group(1)
+                    break
+                elif "story_fbid=" in href or "fbid=" in href:
+                    id_m = re.search(r"(?:story_fbid|fbid)=(\d+)", href)
+                    if id_m:
+                        post_id = id_m.group(1)
+                        gid = re.search(r"/groups/([^/?]+)", extracted_group_url)
+                        gid_val = gid.group(1) if gid else ""
+                        post_url = f"https://www.facebook.com/groups/{gid_val}/posts/{post_id}/" if gid_val else f"https://www.facebook.com/permalink.php?story_fbid={post_id}"
+                        break
+
+            if not post_url or not post_id:
+                continue
+
+            # Bóc tách người đăng
+            author_el = post.query_selector("h2, h3, strong, a[role='link']")
+            author = author_el.inner_text().strip() if author_el else lines[0]
+
+            # Bóc tách giá từ bài đăng (hỗ trợ cả 13tr5, 15tr9, 15.500.000, 19.990.000đ, 20,9 tr)
+            price_str = "Thương lượng"
+            p_mixed = re.search(r'\b(\d+\s*(?:tr|củ|m)[\d.,]+)\b', text_content, re.IGNORECASE)
+            if p_mixed:
+                price_str = p_mixed.group(1)
+            else:
+                p_full = re.search(r'(\d{1,3}(?:[.,]\d{3}){1,3}\s*(?:đ|vnd|vnđ)?)', text_content, re.IGNORECASE)
+                if p_full:
+                    price_str = p_full.group(1)
+                else:
+                    p_std = re.search(r'(\d+[\d.,]*\s*(?:triệu|tr\b|củ\b|k(?!\s*(?:người|lượt|thành|member|follow|sub|bạn))\b|đ\b|vnd|vnđ|m(?![a-z])))', text_content, re.IGNORECASE)
+                    if p_std:
+                        price_str = p_std.group(1)
+
+            # Bóc tách thời gian đăng bài
+            post_time_text = ""
+            extracted_pub_at = None
+            time_candidates = post.query_selector_all("a[role='link'], a[href*='/posts/'], a[href*='permalink'], a[href*='set=pcb'], a[href*='set=gm'], a[href*='story_fbid'], abbr, time")
+            for tc in time_candidates:
+                aria_val = tc.get_attribute("aria-label") or tc.get_attribute("title") or ""
+                txt_val = tc.inner_text().strip()
+                parsed_dt, parsed_str = parse_facebook_time(raw_text=txt_val, aria_label=aria_val)
+                if parsed_dt:
+                    extracted_pub_at = parsed_dt
+                    post_time_text = parsed_str or aria_val or txt_val
+                    break
+                elif parsed_str and not post_time_text:
+                    post_time_text = parsed_str
+
+            if not extracted_pub_at:
+                for l in lines:
+                    l_s = l.strip()
+                    parsed_dt, parsed_str = parse_facebook_time(raw_text=l_s)
+                    if parsed_dt:
+                        extracted_pub_at = parsed_dt
+                        post_time_text = parsed_str or l_s
+                        break
+                    elif parsed_str and any(kw in l_s.lower() for kw in ["trước", "vừa xong", "hôm qua", "tháng"]):
+                        if not post_time_text:
+                            post_time_text = l_s
+
+            # Bóc tách ảnh sản phẩm
+            img_el = post.query_selector("img[src*='fbcdn']")
+            img_url = img_el.get_attribute("src") if img_el else ""
+
+            # Bóc tách bình luận ngay trên bài viết (nếu hiển thị)
+            extracted_comments = []
+            cmt_elements = post.query_selector_all("ul li, div[role='article']")
+            for c_idx, c_el in enumerate(cmt_elements[:8]):
+                c_txt = c_el.inner_text().strip()
+                if len(c_txt) > 3 and "Facebook" not in c_txt:
+                    extracted_comments.append({
+                        "source_comment_id": f"{post_id}_c{c_idx}",
+                        "author": c_txt.split("\n")[0] if "\n" in c_txt else "Thành viên nhóm",
+                        "raw_text": c_txt,
+                        "created_at_source": datetime.utcnow()
+                    })
+
+            posts_data.append({
+                "post_id": post_id,
+                "author": author,
+                "group_name": extracted_group_name or "Hội Nhóm Facebook",
+                "group_url": extracted_group_url or default_group_url,
+                "text": text_content,
+                "price": price_str,
+                "published_at": extracted_pub_at,
+                "post_time_text": post_time_text,
+                "url": post_url,
+                "image_url": img_url,
+                "comments": extracted_comments
+            })
+
+        return posts_data
+
     def fetch(self, query: str = "ram", target_group_url: str = "", **kwargs) -> List[Dict[str, Any]]:
         """
-        Tìm kiếm trên các hội nhóm Facebook đã tham gia liên quan đến từ khóa và đọc bình luận.
-        Hỗ trợ chỉ định quét trực tiếp một nhóm cụ thể qua target_group_url hoặc truyền kèm URL trong query.
+        Thu thập bài viết từ Facebook Groups hoàn toàn tự động:
+        1. Target Group: Quét trực tiếp nhóm chỉ định nếu có target_group_url.
+        2. Direct Search: Quét trực tiếp qua Facebook Search Posts (tự động bao hàm MỌI nhóm bạn đã tham gia mà không cần cache trước).
+        3. Periodic Feed: Quét thẳng https://www.facebook.com/groups/feed/ nếu query rỗng.
+        4. Bổ sung: Lấy thêm bài từ 1-2 nhóm chuyên sâu nếu có trong danh sách nhóm đã tham gia.
         """
         items: List[Dict[str, Any]] = []
 
@@ -229,68 +423,67 @@ class FacebookGroupCollector(BaseCollector):
                 context = self.launch_browser_context(p)
                 page = context.new_page()
 
-                # 1. Tải danh sách nhóm đã tham gia
-                joined_groups = self.load_joined_groups(page=page)
-                
-                # 2. Lọc các nhóm liên quan đến từ khóa (tăng lên 6 nhóm để đa dạng nguồn tin)
-                target_groups = self.get_relevant_joined_groups(query, joined_groups, max_groups=6)
+                scrape_targets = []
 
-                # Nếu có nhóm chỉ định cụ thể, ưu tiên đưa lên đầu tiên
                 if target_group_url and "/groups/" in target_group_url:
                     clean_target = target_group_url.split("?")[0].rstrip("/")
-                    tg_name = "Nhóm Được Chỉ Định"
-                    found_in_cache = False
-                    for jg in joined_groups:
-                        if clean_target in jg.get("url", "") or jg.get("url", "").rstrip("/") == clean_target:
-                            tg_name = jg.get("name", tg_name)
-                            found_in_cache = True
-                            break
-                    target_obj = {"name": tg_name, "url": clean_target}
-                    target_groups = [target_obj] + [g for g in target_groups if clean_target not in g.get("url", "")]
-                    
-                    # Nếu nhóm mới chưa có trong cache joined_groups, tự động bổ sung vào cache
-                    if not found_in_cache:
-                        joined_groups.append(target_obj)
-                        cache_file = self._get_cache_path()
-                        try:
-                            with open(cache_file, "w", encoding="utf-8") as f:
-                                json.dump(joined_groups, f, ensure_ascii=False, indent=2)
-                        except Exception:
-                            pass
-
-                if not target_groups:
-                    logger.warning(f"[{self.source_code}] Không tìm thấy nhóm đã tham gia phù hợp cho '{query}'")
-                    # Fallback tìm kiếm chung trên Search Posts toàn Facebook
+                    encoded_q = urllib.parse.quote(query.strip()) if query else ""
+                    tgt_url = f"{clean_target}/search/?q={encoded_q}" if encoded_q else clean_target
+                    scrape_targets.append({
+                        "name": "Nhóm Chỉ Định",
+                        "url": clean_target,
+                        "search_url": tgt_url
+                    })
+                elif query and query.strip():
                     encoded_q = urllib.parse.quote(query.strip())
-                    target_groups = [{"name": "Facebook Search Posts", "url": f"https://www.facebook.com/search/posts?q={encoded_q}"}]
+                    force_refresh = kwargs.get("force_refresh", False)
+                    joined_groups = self.load_joined_groups(page=None, force_refresh=force_refresh)
+                    relevant = self.get_relevant_joined_groups(query, joined_groups, max_groups=4)
 
-                logger.info(f"[{self.source_code}] Sẽ quét {len(target_groups)} nhóm cho từ khóa '{query}': {[g['name'] for g in target_groups]}")
+                    # 1. ƯU TIÊN CAO NHẤT: Quét trực tiếp các hội nhóm đã tham gia liên quan nhất (100% bài viết chuẩn trong group)
+                    for rg in relevant:
+                        r_url = rg.get("url", "").split("?")[0].rstrip("/")
+                        if r_url:
+                            scrape_targets.append({
+                                "name": rg.get("name", "Hội Nhóm Chuyên Sâu"),
+                                "url": r_url,
+                                "search_url": f"{r_url}/search/?q={encoded_q}"
+                            })
 
-                # 3. Quét từng nhóm liên quan
-                for group in target_groups:
-                    group_name = group.get("name", "Hội Nhóm Facebook")
-                    group_url = group.get("url", "")
-                    
-                    if "/search/posts" in group_url:
-                        search_url = group_url
-                    else:
-                        encoded_q = urllib.parse.quote(query.strip())
-                        clean_url = group_url.split("?")[0].rstrip("/")
-                        search_url = f"{clean_url}/search/?q={encoded_q}"
+                    # 2. Bổ sung: Tìm kiếm toàn cục Facebook Search Posts nếu còn thiếu mục tiêu
+                    if len(scrape_targets) < 3:
+                        scrape_targets.append({
+                            "name": "Facebook Search Posts",
+                            "url": "",
+                            "search_url": f"https://www.facebook.com/search/posts/?q={encoded_q}"
+                        })
+                else:
+                    # Chế độ theo dõi định kỳ: Bảng tin nhóm thời gian thực
+                    scrape_targets.append({
+                        "name": "Facebook Groups Feed",
+                        "url": "https://www.facebook.com/groups/feed/",
+                        "search_url": "https://www.facebook.com/groups/feed/"
+                    })
 
-                    logger.info(f"[{self.source_code}] Truy cập nhóm: '{group_name}' tại {search_url}")
+                logger.info(f"[{self.source_code}] Bắt đầu quét {len(scrape_targets)} mục tiêu cho từ khóa '{query}'")
+
+                for target in scrape_targets:
+                    search_url = target["search_url"]
+                    t_name = target["name"]
+                    t_url = target.get("url", "")
+
+                    logger.info(f"[{self.source_code}] Truy cập '{t_name}' tại {search_url}")
                     try:
                         page.goto(search_url, timeout=35000, wait_until="domcontentloaded")
                         page.wait_for_timeout(3500)
 
-                        # Check Auth / Checkpoint
                         curr = page.url.lower()
                         if "login" in curr or "checkpoint" in curr:
                             logger.error(f"[{self.source_code}] Cần đăng nhập lại Facebook hoặc gặp Checkpoint")
                             break
 
-                        # Cuộn trang 2 lần để kích hoạt tải các bài đăng mới hơn
-                        for _ in range(2):
+                        # Cuộn trang 2-3 lần để tải dữ liệu bài đăng
+                        for _ in range(3):
                             page.mouse.wheel(0, 1600)
                             page.wait_for_timeout(1200)
 
@@ -302,131 +495,16 @@ class FacebookGroupCollector(BaseCollector):
                         }""")
                         page.wait_for_timeout(1000)
 
-                        feed = page.query_selector("div[role='feed']")
-                        post_elements = feed.query_selector_all(":scope > div") if feed else page.query_selector_all("div[role='article']")
-
-                        logger.info(f"[{self.source_code}] Tìm thấy {len(post_elements)} bài đăng trong nhóm '{group_name}'")
-
-                        # Bóc tách từng bài đăng
-                        for idx, post in enumerate(post_elements[:20]):
-                            text_content = post.inner_text().strip()
-                            lines = [l.strip() for l in text_content.split("\n") if l.strip() and l.strip() != "Facebook"]
-                            if len(lines) < 2:
-                                continue
-
-                            # 1. BỎ QUA nếu là Thẻ thành viên / Profile Card / Gợi ý kết bạn
-                            profile_signals = [
-                                "thêm bạn bè", "người sáng tạo nội dung", "người theo dõi",
-                                "theo dõi trang", "xem trang cá nhân", "gửi lời mời", "nhắn tin riêng"
-                            ]
-                            if any(sig in text_content.lower() for sig in profile_signals):
-                                continue
-
-                            # Bóc tách permalink và post_id chính xác (BẮT BUỘC có permalink tới bài đăng)
-                            post_id = ""
-                            post_url = ""
-                            all_links = post.query_selector_all("a")
-                            for a in all_links:
-                                href = a.get_attribute("href") or ""
-                                m = re.search(r"set=(?:gm|pcb)\.(\d+)", href)
-                                if m:
-                                    post_id = m.group(1)
-                                    gid_match = re.search(r"/groups/([^/?]+)", group_url)
-                                    gid = gid_match.group(1) if gid_match else ""
-                                    post_url = f"https://www.facebook.com/groups/{gid}/posts/{post_id}/" if gid else f"https://www.facebook.com/permalink.php?story_fbid={post_id}"
-                                    break
-                                elif "/posts/" in href or "/permalink/" in href:
-                                    clean_h = href.split("?")[0]
-                                    post_url = f"https://www.facebook.com{clean_h}" if clean_h.startswith("/") else clean_h
-                                    id_m = re.search(r"/posts/(\d+)", post_url)
-                                    if id_m:
-                                        post_id = id_m.group(1)
-                                    break
-                                elif "story_fbid=" in href or "fbid=" in href:
-                                    id_m = re.search(r"(?:story_fbid|fbid)=(\d+)", href)
-                                    if id_m:
-                                        post_id = id_m.group(1)
-                                        gid_match = re.search(r"/groups/([^/?]+)", group_url)
-                                        gid = gid_match.group(1) if gid_match else ""
-                                        post_url = f"https://www.facebook.com/groups/{gid}/posts/{post_id}/" if gid else f"https://www.facebook.com/permalink.php?story_fbid={post_id}"
-                                        break
-
-                            # BẮT BUỘC: Nếu không lấy được permalink bài viết (ví dụ banner, menu...) -> BỎ QUA
-                            if not post_url or not post_id or post_url == search_url:
-                                continue
-
-                            # Bóc tách người đăng
-                            author_el = post.query_selector("h2, h3, strong, a[role='link']")
-                            author = author_el.inner_text().strip() if author_el else lines[0]
-
-                            # Bóc tách giá từ bài đăng (tránh nhầm MHz thành m hoặc K người theo dõi)
-                            price_match = re.search(r"(\d+[\d.,]*\s*(?:triệu|tr\b|củ\b|k(?!\s*(?:người|lượt|thành|member|follow|sub|bạn))\b|đ\b|vnd|vnđ|m(?![a-z])))", text_content, re.IGNORECASE)
-                            price_str = price_match.group(1) if price_match else "Thương lượng"
-
-                            # Bóc tách thời gian đăng bài chính xác
-                            post_time_text = ""
-                            extracted_pub_at = None
-
-                            time_candidates = post.query_selector_all("a[role='link'], a[href*='/posts/'], a[href*='permalink'], a[href*='set=pcb'], a[href*='set=gm'], a[href*='story_fbid'], abbr, time")
-                            for tc in time_candidates:
-                                aria_val = tc.get_attribute("aria-label") or tc.get_attribute("title") or ""
-                                txt_val = tc.inner_text().strip()
-                                parsed_dt, parsed_str = parse_facebook_time(raw_text=txt_val, aria_label=aria_val)
-                                if parsed_dt:
-                                    extracted_pub_at = parsed_dt
-                                    post_time_text = parsed_str or aria_val or txt_val
-                                    break
-                                elif parsed_str and not post_time_text:
-                                    post_time_text = parsed_str
-
-                            if not extracted_pub_at:
-                                for l in lines:
-                                    l_s = l.strip()
-                                    parsed_dt, parsed_str = parse_facebook_time(raw_text=l_s)
-                                    if parsed_dt:
-                                        extracted_pub_at = parsed_dt
-                                        post_time_text = parsed_str or l_s
-                                        break
-                                    elif parsed_str and any(kw in l_s.lower() for kw in ["trước", "vừa xong", "hôm qua", "tháng"]):
-                                        if not post_time_text:
-                                            post_time_text = l_s
-
-                            # Bóc tách ảnh sản phẩm
-                            img_el = post.query_selector("img[src*='fbcdn']")
-                            img_url = img_el.get_attribute("src") if img_el else ""
-
-                            # Bóc tách bình luận ngay trên bài viết (nếu hiển thị)
-                            extracted_comments = []
-                            cmt_elements = post.query_selector_all("ul li, div[role='article']")
-                            for c_idx, c_el in enumerate(cmt_elements[:8]):
-                                c_txt = c_el.inner_text().strip()
-                                if len(c_txt) > 3 and "Facebook" not in c_txt:
-                                    extracted_comments.append({
-                                        "source_comment_id": f"{post_id}_c{c_idx}",
-                                        "author": c_txt.split("\n")[0] if "\n" in c_txt else "Thành viên nhóm",
-                                        "raw_text": c_txt,
-                                        "created_at_source": datetime.utcnow()
-                                    })
-
-                            items.append({
-                                "post_id": post_id,
-                                "author": author,
-                                "group_name": group_name,
-                                "group_url": group_url,
-                                "text": text_content,
-                                "price": price_str,
-                                "published_at": extracted_pub_at,
-                                "post_time_text": post_time_text,
-                                "url": post_url,
-                                "image_url": img_url,
-                                "comments": extracted_comments
-                            })
+                        extracted = self._extract_posts_from_page(page, default_group_name=t_name, default_group_url=t_url)
+                        for itm in extracted:
+                            if not any(x.get("post_id") == itm["post_id"] for x in items):
+                                items.append(itm)
 
                     except Exception as e_grp:
-                        logger.warning(f"[{self.source_code}] Lỗi khi cào nhóm '{group_name}': {e_grp}")
+                        logger.warning(f"[{self.source_code}] Lỗi khi cào '{t_name}': {e_grp}")
                         continue
 
-                # 4. Đọc bình luận chuyên sâu cho Top 2 bài đăng đầu tiên (nếu có permalink fbid rõ ràng)
+                # Đọc bình luận chuyên sâu cho Top 2 bài đăng đầu tiên (nếu có permalink fbid rõ ràng)
                 for item in items[:2]:
                     if not item.get("comments") and item.get("post_id") and item["post_id"].isdigit():
                         gid_match = re.search(r"/groups/([^/?]+)", item.get("group_url", ""))

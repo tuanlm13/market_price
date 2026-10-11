@@ -1,4 +1,8 @@
 .env
+*.env
+*env*
+!*.env.example
+homesvenv
 __pycache__/
 *.pyc
 node_modules/
@@ -17,3 +21,6 @@ venv/
 .venv/
 .idea/
 .vscode/
+screenshots/*debug*.png
+screenshots/group_search_*.png
+screenshots/groups_sync.png

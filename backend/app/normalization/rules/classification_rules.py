@@ -78,9 +78,13 @@ def classify_listing_intent(title: str, description: str = "") -> Tuple[str, flo
             return "SPAM", 0.95
 
     # 2. Priority check on Title first for accessories and parts
+    cleaned_title = re.sub(r"\b(bao gồm|kèm|đủ|full|gồm|tất cả|tặng|tặng kèm)\s+[^,\n]+?(?:phụ kiện|combo|quà|voucher|ốp|sạc|cáp|cường lực)\b", "", title_lower)
     for pat in ACCESSORY_PATTERNS:
-        if re.search(pat, title_lower):
-            return "ACCESSORY", 0.95
+        if re.search(pat, cleaned_title):
+            # Nếu title vừa có tên thiết bị chính vừa có phụ kiện nhưng mở đầu bằng phụ kiện (vd: "Ốp lưng iPhone 16")
+            device_pat = r"\b(iphone|ipad|macbook|imac|laptop|điện thoại|smartphone|ram|vga|rtx|gtx|pocket|camera|máy ảnh|dji|robot|thinkpad|dell|hp|asus|acer|lenovo)\b"
+            if not re.search(device_pat, cleaned_title) or re.search(r"^(?:bán\s+|cần bán\s+|pass\s+)?(ốp|cường lực|củ sạc|dây sạc|cáp|case|bao da|dock|hộp rỗng|khay sim)", cleaned_title):
+                return "ACCESSORY", 0.95
 
     for pat in PARTS_PATTERNS:
         if re.search(pat, title_lower):
@@ -95,9 +99,13 @@ def classify_listing_intent(title: str, description: str = "") -> Tuple[str, flo
             return "BUY", 0.95
 
     # 3. Check full text (Title + Description)
-    for pat in ACCESSORY_PATTERNS:
-        if re.search(pat, text):
-            return "ACCESSORY", 0.85
+    # Nếu title đã xác định rõ là thiết bị chính (iPhone, Laptop, RAM...) thì phụ kiện trong mô tả là quà tặng/đồ đi kèm
+    device_in_title = bool(re.search(r"\b(iphone|ipad|macbook|imac|laptop|điện thoại|smartphone|ram|vga|rtx|gtx|pocket|camera|máy ảnh|dji|robot|thinkpad|dell|hp|asus|acer|lenovo)\b", title_lower))
+    if not device_in_title:
+        cleaned_text = re.sub(r"\b(tặng|tặng kèm|free|kèm|kèm theo|hỗ trợ|bao gồm)\s+[^.\n]+", "", text)
+        for pat in ACCESSORY_PATTERNS:
+            if re.search(pat, cleaned_text):
+                return "ACCESSORY", 0.85
 
     for pat in PARTS_PATTERNS:
         if re.search(pat, text):

@@ -111,10 +111,22 @@ class TelegramBotListener:
                 "💡 <b>Cách sử dụng:</b>\n"
                 "• Nhắn: <code>tìm giá [tên máy]</code> (VD: <i>tìm giá iphone 16 plus</i>)\n"
                 "• Nhắn: <code>giá [tên máy]</code> (VD: <i>giá rtx 4060</i>)\n"
-                "• Lệnh tắt: <code>/find [tên máy]</code>\n\n"
+                "• Lệnh tắt: <code>/find [tên máy]</code>\n"
+                "• Đồng bộ nhóm Facebook: <code>/sync_groups</code>\n\n"
                 "⚡ Tôi sẽ tự động cào tin từ <b>Facebook Marketplace</b> & <b>Chợ Tốt</b> và gửi bảng phân tích giá ngay cho bạn!"
             )
             self._send_message(chat_id, welcome)
+            return
+
+        # Kiểm tra lệnh đồng bộ danh sách nhóm Facebook
+        if text_lower in ("/sync_groups", "/update_groups", "/nhom", "đồng bộ nhóm", "dong bo nhom"):
+            self._send_message(chat_id, "🔄 <b>Đang đồng bộ lại danh sách nhóm Facebook đã tham gia...</b>\nVui lòng đợi trong giây lát.")
+            try:
+                from app.collectors.service import run_collector_job
+                run_collector_job("FACEBOOK_GROUPS", query="", force_refresh=True)
+                self._send_message(chat_id, "✅ <b>Đồng bộ danh sách nhóm Facebook hoàn tất!</b>\nMọi nhóm mới đã được nạp vào hệ thống.")
+            except Exception as e:
+                self._send_message(chat_id, f"⚠️ Đồng bộ nhóm gặp lỗi: {e}")
             return
 
         # Nhận diện nếu người dùng dán kèm link nhóm Facebook cụ thể
@@ -166,7 +178,7 @@ class TelegramBotListener:
             # 3. Chuẩn hóa dữ liệu
             db = SessionLocal()
             try:
-                process_batch_listings(db, limit=40)
+                process_batch_listings(db, limit=100)
 
                 # 4. Ưu tiên lấy từ FactNormalizedListing (đã qua pipeline classification)
                 normalized_recent = (
@@ -177,7 +189,7 @@ class TelegramBotListener:
                         FactNormalizedListing.normalized_price > 0
                     )
                     .order_by(desc(FactNormalizedListing.normalized_at))
-                    .limit(80)
+                    .limit(150)
                     .all()
                 )
 
@@ -209,6 +221,19 @@ class TelegramBotListener:
                     if raw.raw_metadata and isinstance(raw.raw_metadata, dict):
                         grp_name = raw.raw_metadata.get("group_name", "")
 
+                    src_code = ""
+                    if raw.source and hasattr(raw.source, "code"):
+                        src_code = raw.source.code.upper()
+                    if not src_code:
+                        if "facebook.com/groups" in raw.url:
+                            src_code = "FACEBOOK_GROUPS"
+                        elif "facebook.com/marketplace" in raw.url:
+                            src_code = "FACEBOOK_MARKETPLACE"
+                        elif "chotot.com" in raw.url:
+                            src_code = "CHOTOT"
+                        else:
+                            src_code = "FACEBOOK_GROUPS" if grp_name else "FACEBOOK_MARKETPLACE"
+
                     source_str = raw.source.name if raw.source else "Marketplace"
                     if grp_name:
                         source_str = f"Hội nhóm: {grp_name[:35]}"
@@ -220,6 +245,7 @@ class TelegramBotListener:
                         "price_text": raw.raw_price_text,
                         "url": raw.url,
                         "source": source_str,
+                        "source_code": src_code,
                         "comment_count": cmt_count
                     })
 
@@ -253,6 +279,19 @@ class TelegramBotListener:
                         if item.raw_metadata and isinstance(item.raw_metadata, dict):
                             grp_name = item.raw_metadata.get("group_name", "")
 
+                        src_code = ""
+                        if item.source and hasattr(item.source, "code"):
+                            src_code = item.source.code.upper()
+                        if not src_code:
+                            if "facebook.com/groups" in item.url:
+                                src_code = "FACEBOOK_GROUPS"
+                            elif "facebook.com/marketplace" in item.url:
+                                src_code = "FACEBOOK_MARKETPLACE"
+                            elif "chotot.com" in item.url:
+                                src_code = "CHOTOT"
+                            else:
+                                src_code = "FACEBOOK_GROUPS" if grp_name else "FACEBOOK_MARKETPLACE"
+
                         source_str = item.source.name if item.source else "Marketplace"
                         if grp_name:
                             source_str = f"Hội nhóm: {grp_name[:35]}"
@@ -264,6 +303,7 @@ class TelegramBotListener:
                             "price_text": item.raw_price_text,
                             "url": item.url,
                             "source": source_str,
+                            "source_code": src_code,
                             "comment_count": cmt_count
                         })
 
@@ -284,15 +324,54 @@ class TelegramBotListener:
                 median_price = statistics.median(prices)
                 quick_sell = median_price * 0.92
 
-                # 5. Soạn tin nhắn báo cáo
+                # 5. Phân nhóm theo từng nền tảng và lấy 3 bài viết đại diện trên mỗi nền tảng
+                grouped_by_platform: Dict[str, List[Dict[str, Any]]] = {
+                    "FACEBOOK_GROUPS": [],
+                    "FACEBOOK_MARKETPLACE": [],
+                    "CHOTOT": []
+                }
+                for it in matched_items:
+                    sc = it.get("source_code", "CHOTOT")
+                    if sc in grouped_by_platform:
+                        grouped_by_platform[sc].append(it)
+                    else:
+                        grouped_by_platform["CHOTOT"].append(it)
+
+                platform_titles = {
+                    "FACEBOOK_GROUPS": "👥 <b>HỘI NHÓM FACEBOOK</b>",
+                    "FACEBOOK_MARKETPLACE": "🛍️ <b>FACEBOOK MARKETPLACE</b>",
+                    "CHOTOT": "🛒 <b>CHỢ TỐT</b>"
+                }
+
                 top_items_text = ""
-                for idx, it in enumerate(matched_items[:5], 1):
-                    cmt_badge = f" | 💬 {it['comment_count']} bình luận" if it['comment_count'] > 0 else ""
-                    top_items_text += (
-                        f"<b>{idx}. {it['title'][:55]}</b>\n"
-                        f"   🏷️ Giá: <code>{it['price']:,.0f} đ</code> | 📍 {it['source']}{cmt_badge}\n"
-                        f"   🔗 <a href=\"{it['url']}\">Bấm vào đây để mở bài đăng gốc</a>\n\n"
-                    )
+                item_idx = 1
+                top_per_platform: List[Dict[str, Any]] = []
+
+                for sc, p_name in platform_titles.items():
+                    p_items = grouped_by_platform[sc][:3]
+                    if p_items:
+                        top_items_text += f"{p_name} (Top {len(p_items)}):\n"
+                        for it in p_items:
+                            cmt_badge = f" | 💬 {it['comment_count']} cmt" if it['comment_count'] > 0 else ""
+                            top_items_text += (
+                                f"<b>{item_idx}. {it['title'][:55]}</b>\n"
+                                f"   🏷️ Giá: <code>{it['price']:,.0f} đ</code> | 📍 {it['source']}{cmt_badge}\n"
+                                f"   🔗 <a href=\"{it['url']}\">Bấm vào đây để mở bài đăng gốc</a>\n\n"
+                            )
+                            item_idx += 1
+                            top_per_platform.append(it)
+
+                # Fallback nếu gom nhóm bị rỗng
+                if not top_items_text:
+                    for it in matched_items[:9]:
+                        cmt_badge = f" | 💬 {it['comment_count']} cmt" if it['comment_count'] > 0 else ""
+                        top_items_text += (
+                            f"<b>{item_idx}. {it['title'][:55]}</b>\n"
+                            f"   🏷️ Giá: <code>{it['price']:,.0f} đ</code> | 📍 {it['source']}{cmt_badge}\n"
+                            f"   🔗 <a href=\"{it['url']}\">Bấm vào đây để mở bài đăng gốc</a>\n\n"
+                        )
+                        item_idx += 1
+                        top_per_platform.append(it)
 
                 report_msg = (
                     f"📊 <b>KẾT QUẢ THỊ TRƯỜNG: {keyword.upper()}</b>\n\n"
@@ -300,16 +379,16 @@ class TelegramBotListener:
                     f"📉 <b>Giá rẻ nhất:</b> <code>{min_price:,.0f} đ</code>\n"
                     f"🎯 <b>Giá trung vị (Median):</b> <code>{median_price:,.0f} đ</code>\n"
                     f"⚡ <b>Giá thanh khoản nhanh (Quick Sell):</b> <code>{quick_sell:,.0f} đ</code>\n\n"
-                    f"🏆 <b>TOP BÀI ĐĂNG TỐT NHẤT (KÈM BÌNH LUẬN):</b>\n\n"
+                    f"🏆 <b>DANH SÁCH BÀI ĐĂNG TỐT NHẤT THEO NỀN TẢNG (3 BÀI/NỀN TẢNG):</b>\n\n"
                     f"{top_items_text}"
                     f"💡 <i>Gợi ý: Giá mua sang tay nên thấp hơn 8-10% so với giá shop bán lẻ (ClickBuy, Oneway, Di Động Việt).</i>"
                 )
 
                 inline_kb = None
-                if matched_items:
+                if top_per_platform:
                     inline_kb = {
                         "inline_keyboard": [
-                            [{"text": "👉 Xem bài đăng rẻ nhất", "url": matched_items[0]["url"]}]
+                            [{"text": "👉 Xem bài đăng rẻ nhất", "url": top_per_platform[0]["url"]}]
                         ]
                     }
 
